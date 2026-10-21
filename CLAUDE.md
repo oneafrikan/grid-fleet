@@ -4,7 +4,7 @@
 
 `grid-fleet`: terminal dashboard (Python, stdlib only) for Claude Code sessions, tokens,
 subagent usage and Max-plan limits across a fleet of machines.
-Status: spec approved (`openspec/changes/fleet-tracer-bullet/`), build not started. No code yet.
+Status: spec approved (`openspec/changes/fleet-tracer-bullet/`). Groups 1-4 built and QA-verified; Group 5 is a HUMAN checkpoint; groups 6-9 not started.
 
 ## Hard constraints
 
@@ -20,7 +20,8 @@ Status: spec approved (`openspec/changes/fleet-tracer-bullet/`), build not start
 ## Hygiene and privacy
 
 - The repo is destined to be public. NO machine names, IPs, account names, usernames or
-  home paths in any tracked file. Test fixtures are synthetic. Per-user rollout (which hub,
+  home paths in any tracked file. Only exceptions: the maintainer's GitHub handle `oneafrikan`
+  and the copyright holder name in `LICENSE`. Test fixtures are synthetic. Per-user rollout (which hub,
   which hosts) lives outside this repo.
 - Privacy contract: with any config, no snapshot field contains a cwd, session name,
   project directory name or session id. There is no opt-in in v1.
@@ -62,5 +63,5 @@ Intended specialist agents (the-grid names):
 
 ## Git
 
-- Local only: there is NO git remote yet. Do not add one or push; the human creates it (see `TODO.md`).
+- Work is committed locally on `build/tracer-bullet`; there is NO git remote yet. Do not add one or push; the human creates it (see `TODO.md`).
 - Commit style: `type(scope): subject` (feat, fix, docs, spec, chore). Commit after each logical unit.

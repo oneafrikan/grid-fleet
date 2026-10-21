@@ -2,7 +2,7 @@
 
 A btop-style terminal dashboard for your Claude Code sessions across all your machines.
 
-**Status: pre-alpha, spec approved, build not started.** Nothing is implemented yet.
+**Status: pre-alpha, spec approved. Groups 1-4 (tracer bullet) are built and QA-verified; Group 5 is a human checkpoint; groups 6-9 are not started.**
 The plan is in [`openspec/changes/fleet-tracer-bullet/`](openspec/changes/fleet-tracer-bullet/).
 
 ## What and why
