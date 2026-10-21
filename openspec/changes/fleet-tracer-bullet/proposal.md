@@ -7,7 +7,7 @@ Running Claude Code on several machines gives no single view of what the fleet i
 - New Python (stdlib-only, 3.9-compatible) CLI `grid-fleet` with four commands: `collect`, `push`, `view`, `install`.
 - `collect` writes one snapshot JSON per host: session counts (busy/waiting), output and input/cache tokens, 7-day subagent-type leaderboard (main session included), and the latest Max-plan limits if captured.
 - `push` sends the snapshot to a hub over plain `ssh` (hub identity = an ssh host alias). The hub needs only `sshd`.
-- `view` runs on the hub: a curses, btop-style dashboard reading snapshot files directly, with a limits strip shown once per account. It also appends snapshots to a history file.
+- `view` runs on the hub: a curses, btop-style dashboard reading snapshot files directly, with a limits strip shown once per account. It shows "now" only; there is no stored history.
 - `install` prints (and, on confirmation, applies) a launchd agent or systemd user timer, and an opt-in statusLine wrapper that captures `rate_limits` without replacing the user's existing statusLine.
 - Tracer-bullet order: collect on one host, push to a hub, minimal view, then limits strip, then installers.
 
@@ -16,7 +16,7 @@ Running Claude Code on several machines gives no single view of what the fleet i
 ### New
 
 - `snapshot-collect`: per-host snapshot of sessions, tokens, subagent usage and limits; incremental, fail-soft, privacy-default.
-- `push-transport`: ssh push to a hub inbox, atomic delivery, hub-side history append.
+- `push-transport`: ssh push to a hub inbox, atomic delivery.
 - `hub-view-tui`: terminal dashboard, staleness rules, per-account limits.
 - `limits-capture`: statusLine tap that records `rate_limits` and chains to the user's existing command.
 - `install-timers`: launchd / systemd user timers and the confirmed statusLine change.
@@ -30,7 +30,7 @@ None. No specs exist yet in `openspec/specs/`.
 - New repo content: `bin/grid-fleet`, `grid_fleet/` package, `tests/` with synthetic fixtures, docs. Nothing outside this repo is modified by this change.
 - Reads (on each host, read-only): the output of `claude agents --json`; `~/.claude/projects/**/*.jsonl` and `subagents/agent-*.meta.json` for `usage`, `timestamp` and `agentType` only.
 - Writes (on each host): a snapshot, an offset cache and a limits file under the XDG state dir; a config file under the XDG config dir. `install` (on confirmation) writes a timer unit and edits `~/.claude/settings.json`.
-- Writes (on the hub): `<host>.json` files and a history file under the XDG state dir.
+- Writes (on the hub): `<host>.json` files under the XDG state dir.
 - Depends on the Claude Code on-disk layout, which is undocumented and may change between versions. The collector fails soft and warns.
 - Follow-up outside this repo: a docs pointer from the-grid to grid-fleet (task 9.2; separate change on its own branch in the-grid).
 
@@ -39,6 +39,7 @@ None. No specs exist yet in `openspec/specs/`.
 - Agents other than Claude Code, and any plugin system.
 - HTML or web output, a web server on the hub, or any listening port. A future renderer over the same snapshot JSON is possible but not part of v1.
 - Per-session drill-down (no session list, no cwd or session name display).
+- History / time-series storage: deferred. Snapshots keep `schema` so a later change can add it.
 - Currency cost. Tokens only.
 - The undocumented OAuth usage endpoint (`/api/oauth/usage`) and any credential or Keychain read.
 - Sending notifications or alerts.

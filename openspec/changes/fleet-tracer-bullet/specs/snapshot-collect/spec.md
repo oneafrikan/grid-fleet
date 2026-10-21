@@ -103,15 +103,11 @@ The collector MUST NOT fail the run because of an unreadable file, an unparseabl
 - **THEN** collection still runs and `warnings` contains a version warning
 
 ### Requirement: Privacy by default
-Snapshots, logs and warnings MUST NOT contain working directories, session names, project directory names, session ids, file paths or transcript text unless `privacy.include_session_details` is true, in which case only `sessions.items` gains `status`, `name` and `cwd`. The collector SHALL read only `type`, `message.id`, `message.usage`, `timestamp` from transcript lines and `agentType` from meta files.
+Snapshots, logs and warnings MUST NOT contain working directories, session names, project directory names, session ids, file paths or transcript text, whatever the configuration. There is no opt-in to include them. The collector SHALL read only `type`, `message.id`, `message.usage`, `timestamp` from transcript lines and `agentType` from meta files.
 
-#### Scenario: Default config
-- **WHEN** collect runs with default config on a host whose sessions have names and working directories
-- **THEN** no string in the snapshot equals or contains any of those names or directories
-
-#### Scenario: Opt-in
-- **WHEN** `privacy.include_session_details` is true
-- **THEN** `sessions.items` lists status, name and cwd per counted session and no other section changes
+#### Scenario: No identifying strings
+- **WHEN** collect runs, with any config, on a host whose sessions have names and working directories
+- **THEN** no string in the snapshot equals or contains any of those names, directories, project directory names or session ids
 
 ### Requirement: Runtime constraints
 All commands SHALL run on Python 3.9 using only the standard library, on macOS and Linux, and configuration SHALL be JSON.

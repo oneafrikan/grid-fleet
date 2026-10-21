@@ -18,9 +18,9 @@
  |   claude agents --json     | ----------------> | inbox/<host>.json  (atomic)  |
  |   transcript tail-sum      |                   |           |                  |
  |   limits.json (from tap)   |                   | grid-fleet view  (curses)    |
- | -> snapshot.json -> push   |                   |   reads inbox, appends       |
- +----------------------------+                   |   history/history-YYYY.jsonl |
-        ^ statusLine tap                          +------------------------------+
+ | -> snapshot.json -> push   |                   |   reads inbox (now only)     |
+ +----------------------------+                   +------------------------------+
+        ^ statusLine tap
         | (Claude Code -> tap -> original statusLine)
 ```
 
@@ -39,7 +39,7 @@ grid_fleet/snapshot.py      snapshot build + schema constants
 grid_fleet/sources_claude.py  agents --json, transcript scan, offset cache, version warning
 grid_fleet/limits.py        tap (statusLine wrapper) + limits.json read
 grid_fleet/push.py          ssh/local delivery
-grid_fleet/hub.py           inbox read, staleness, history ingest
+grid_fleet/hub.py           inbox read, staleness
 grid_fleet/view.py          curses UI
 grid_fleet/install.py       launchd/systemd units, statusLine edit
 tests/                      unittest; tests/helpers builds a synthetic ~/.claude tree
@@ -92,7 +92,7 @@ One JSON object per host per collection. A section that could not be collected i
 - `agents.last_7d`: `type` is `agentType` from `agent-<id>.meta.json`, or `main` for the session transcript itself. `invocations` = distinct transcripts (one subagent file, or one main session file) with at least one usage event in the window. `output` = output tokens in the window. Sorted by `invocations` desc.
 - `limits`: copied from the local `limits.json` written by the tap; `null` when never captured. Each window is independently optional.
 - `warnings`: short strings; no paths, no transcript text.
-- Decided: when `privacy.include_session_details` is true, `sessions.items` is added: `[{"status","name","cwd"}]`. The v1 view does not render it. Default false; with default config no snapshot field contains a cwd, session name, project directory name or session id.
+- Decided: no snapshot field contains a cwd, session name, project directory name or session id, whatever the config. There is no opt-in in v1 (no consumer; see non-goals in `proposal.md`).
 - Decided: invocations count transcripts with activity in the window, not spawn events, because spawn events are not reliably in the undocumented layout.
 
 ## Incremental token summing
@@ -119,9 +119,6 @@ Hub state dir: `$XDG_STATE_HOME/grid-fleet/` (default `~/.local/state/grid-fleet
 ```
 inbox/<host>.json              latest snapshot per host (atomic rename)
 inbox/.<host>.json.tmp         in-flight upload; ignored by readers
-history/history-YYYY.jsonl     appended snapshots (see below)
-history/ingest.json            {"<host>": <last hour bucket ingested>}
-history/.lock                  flock during ingest
 ```
 
 - Upload script run by `push` on the hub (POSIX sh, one single-quoted `sh -c` argument so the user's login shell does not matter): `umask 077; d="${XDG_STATE_HOME:-$HOME/.local/state}/grid-fleet/inbox"; mkdir -p "$d" && cat > "$d/.H.json.tmp" && mv "$d/.H.json.tmp" "$d/H.json"` with `H` the sanitised host name.
@@ -136,13 +133,6 @@ history/.lock                  flock during ingest
 - `view.expected_hosts` (optional) lists host names that must appear; one with no inbox file renders `unknown (never reported)`.
 - Limits freshness: shown while `now < resets_at` of that window, annotated `as of <age>`; dim when age > 1 h; rendered `unknown` once `now >= resets_at` (the stored percentage no longer applies). Decided.
 - Limits across hosts: per `account`, take the `limits` with the greatest `captured_at` among fresh-or-stale hosts; windows are chosen independently.
-
-### History file
-
-- Decided: JSONL, one record per host per hour, in `history-YYYY.jsonl` (year of `collected_at`, UTC). At about 9 MB per host-year this stays greppable without rotation tooling.
-- Record = the snapshot with `sessions.items` and `warnings` removed, plus `"ingested_at"`.
-- Ingest runs inside `view` on every inbox refresh, and as `grid-fleet view --ingest-only` (no TUI) for cron/timers, and from `push` in local-hub mode. Idempotent: a record is appended only if its hour bucket (`collected_at // 3600`) is greater than `ingest.json[host]`. `fcntl.flock` guards concurrent ingesters.
-- The view does not read history in v1 (the 7-day series comes from the snapshot). History is a durable record for later renderers.
 
 ## Limits capture
 
@@ -159,7 +149,7 @@ history/.lock                  flock during ingest
 - If the original command is absent, the tap prints nothing and exits 0.
 - Decided: Python tap, slice-only. Rejected: a shell wrapper that stores the whole payload (faster, but the stored file would then contain cwd, session id and transcript path). Fallback if spike 7.1 fails the overhead bound: shell wrapper writing the full payload to a 0600 file that `collect` slices; trade privacy-on-disk for speed. That is a HUMAN call recorded then.
 - `install` rewrites `statusLine.command` to `<python> <bin/grid-fleet> tap -- <original command>` only after printing the exact before/after and getting a yes (see install-timers spec). The original command string is saved in the config as `statusline_original` so uninstall restores it byte-for-byte.
-- Orca: on the reference setup the existing statusLine is a script gated by env vars. The tap passes the environment through, so gating keeps working; spike 7.1 verifies.
+- Decided: the existing statusLine may be a script gated by env vars (the pattern agent-hook tools use): it exits early unless certain variables are set. The tap passes the full environment through unchanged and chains stdin, stdout and exit code, so gating keeps working; spike 7.1 verifies with and without the gating variables set.
 
 ## Config (`config.json`, schema 1)
 
@@ -172,7 +162,6 @@ Path: `$GRID_FLEET_CONFIG`, else `$XDG_CONFIG_HOME/grid-fleet/config.json`, else
   "account": "default",
   "interval_s": 600,
   "hub": "hub-alias",
-  "privacy": {"include_session_details": false},
   "view": {"expected_hosts": ["alpha", "beta"], "refresh_s": 5, "ascii": false},
   "statusline_original": null
 }
@@ -240,7 +229,6 @@ Path: `$GRID_FLEET_CONFIG`, else `$XDG_CONFIG_HOME/grid-fleet/config.json`, else
 - Cost in currency: depends on a price table that changes; tokens are the unit.
 - TOML config: `tomllib` is 3.11+; stock macOS has 3.9.
 - Third-party TUI libraries (rich, textual): breaks "zero dependencies".
-- SQLite history: stdlib has it, but JSONL is greppable and append-only.
 - Plugin system for other agents: YAGNI; one source module per agent when needed.
 
 ## Risks
@@ -252,13 +240,17 @@ Path: `$GRID_FLEET_CONFIG`, else `$XDG_CONFIG_HOME/grid-fleet/config.json`, else
 - Statusline taps run on every refresh in every session. Mitigation: overhead bound in spike 7.1; the tap never blocks on the network.
 - `rate_limits` appear only after a session's first API response, so a freshly booted host reports `limits: null`. The hub takes limits from whichever host captured most recently.
 - Account label is user-supplied; two hosts mislabelled show different accounts. Acceptable for v1.
-- History growth is bounded by the hourly rule.
 
 ## Open questions
 
-1. Hub that is not also a running view: nothing ingests history. Add `install --hub` that schedules `view --ingest-only`, or accept gaps? (Draft: accept gaps in v1.)
-2. `privacy.include_session_details` has no v1 consumer. Keep the key (guards the privacy contract now) or cut until a drill-down exists?
-3. Internal `tap` subcommand extends the four-command surface. Acceptable, or fold into `collect --tap`?
-4. Is `CLAUDE_CONFIG_DIR` honoured by Claude Code for the projects dir? Unverified; collector honours it if set.
-5. UTC vs local day for `by_day`: hosts in different timezones would disagree on local days. Draft: UTC.
-6. Hourly history thinning: enough?
+Open questions: none blocking.
+
+1. Is `CLAUDE_CONFIG_DIR` honoured by Claude Code for the projects dir? Unverified; the collector honours it if set. Not blocking: a one-line check is folded into spike 2.1.
+
+Decided (formerly open):
+
+- Decided: `tap` stays an internal subcommand (`grid-fleet tap -- <original command...>`), outside the four user-facing commands. Not folded into `collect`.
+- Decided: `by_day` uses UTC dates, so hosts in different timezones agree.
+- Decided: the account label is user-set in config (`account`, default `"default"`). It is not read from Claude.
+- Decided: limits dim and expiry rules as drafted under Staleness: shown while `now < resets_at`, dim when capture age > 1 h, `unknown` once `now >= resets_at`.
+- Decided: history / time-series storage is deferred out of v1. The collector already computes the 7-day window from local logs via the offset cache; snapshots keep `schema` so a later change can add history.

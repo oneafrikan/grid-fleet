@@ -1,6 +1,6 @@
 ## Purpose
 
-Deliver each host's latest snapshot to a hub the user chooses, over plain ssh, with no hub-side service beyond `sshd`, and keep a durable history on the hub.
+Deliver each host's latest snapshot to a hub the user chooses, over plain ssh, with no hub-side service beyond `sshd`.
 
 ## ADDED Requirements
 
@@ -50,21 +50,6 @@ Push MUST refuse to run if the host name contains characters outside `A-Za-z0-9.
 #### Scenario: Malicious host name
 - **WHEN** config sets `host_name` to `../x; rm -rf ~`
 - **THEN** the name is sanitised before use and nothing outside the inbox directory is written
-
-### Requirement: History append
-The hub SHALL append snapshots to `history/history-YYYY.jsonl` at most once per host per hour, idempotently, without `sessions.items` or `warnings`.
-
-#### Scenario: Two snapshots in one hour
-- **WHEN** two snapshots from the same host fall in the same UTC hour
-- **THEN** only the first is appended
-
-#### Scenario: Re-ingest
-- **WHEN** ingest runs twice over the same inbox
-- **THEN** the history file is unchanged by the second run
-
-#### Scenario: Concurrent ingesters
-- **WHEN** two ingest processes run at once
-- **THEN** no record is duplicated or interleaved
 
 ### Requirement: No credentials in the tool
 grid-fleet SHALL rely on the user's own ssh configuration and agent and MUST NOT read, store or transmit keys, passwords or tokens.

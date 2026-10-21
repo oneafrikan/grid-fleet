@@ -93,9 +93,9 @@ The view SHALL redraw on terminal resize, show a one-line message below 60 colum
 - **WHEN** `NO_COLOR` is set
 - **THEN** no colour attributes are used and meaning is still conveyed by text
 
-### Requirement: Read-only apart from history
-The view SHALL write only history files and their lock/ingest state.
+### Requirement: Read-only
+The view SHALL NOT write any file.
 
 #### Scenario: Inbox untouched
 - **WHEN** view runs for a minute and exits
-- **THEN** inbox files are byte-identical and mtimes unchanged
+- **THEN** inbox files are byte-identical and mtimes unchanged, and no file is created in the state dir
