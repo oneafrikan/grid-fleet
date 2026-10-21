@@ -56,6 +56,10 @@ Intended specialist agents (the-grid names):
 | Gate after push + install | grid-security-reviewer, then grid-qa-engineer |
 | Docs (9) | grid-technical-writer |
 
+## Try it locally
+
+- `scripts/try-local.sh [--no-view]`: one-command local try-out (throwaway state dir, collect twice, push to hub `local`, view); removes its temp dir on exit.
+
 ## Related repos
 
 - the-grid (public): a related toolkit, not a dependency. Read-only from here. The docs pointer from
