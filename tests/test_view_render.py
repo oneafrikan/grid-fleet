@@ -133,6 +133,21 @@ class TestHostsTable(RenderCase):
         self.assertEqual(self.span_tag(lines, "unknown"), view.GREY)
         self.assertIn("412k", cells)  # the other sections are still shown
 
+    def test_absurdly_large_counts_do_not_crash_the_view(self):
+        # 10**400 is well under the 256 KiB file cap but overflows float division in
+        # fmt_tokens. The reader must treat it as unknown; other hosts still render.
+        huge = 10 ** 400
+        self.put("alpha", tokens={
+            "last_24h": tokens_window(huge, huge, huge, huge),
+            "last_7d": tokens_window(huge, huge, huge, huge),
+            "by_day": [],
+        })
+        self.put("beta")
+        texts = self.text()  # must not raise
+        cells = self.row(texts, "alpha").strip("│ ").split()
+        self.assertEqual(cells[3:5], ["unknown", "unknown"])
+        self.assertEqual(self.row(texts, "beta").strip("│ ").split()[3], "412k")
+
     def test_null_tokens_render_unknown_and_drop_muted_line(self):
         self.put("alpha", tokens=NULL)
         texts = self.text()

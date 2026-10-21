@@ -43,6 +43,10 @@ MAX_FILE_BYTES = 256 * 1024
 KNOWN_SCHEMAS = (1,)
 # Stale when age > STALE_FACTOR * interval_s (design.md "Staleness").
 STALE_FACTOR = 2
+# Largest count the reader believes. Real token counts stay far below this; a snapshot
+# claiming more (e.g. 10**400, which fits in the file size cap) is treated as "not
+# promised" so the view never does float maths on an astronomically large int.
+MAX_COUNT = 10 ** 15
 
 FRESH = "fresh"
 STALE = "stale"
@@ -222,8 +226,8 @@ def scan_inbox(state_dir: str) -> InboxScan:
 
 
 def _count(value) -> Optional[int]:
-    """A non-negative int (bool excluded) or None. Anything else is 'not promised'."""
-    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+    """A non-negative int up to MAX_COUNT (bool excluded) or None. Anything else is 'not promised'."""
+    if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= MAX_COUNT:
         return None
     return value
 

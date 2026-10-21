@@ -236,6 +236,16 @@ class TestAggregation(HubCase):
         # and with no fresh hosts at all
         self.assertIsNone(hub.build_state(hub.InboxScan(), NOW).busy.value)
 
+    def test_absurdly_large_counts_are_unknown_not_a_crash(self):
+        huge = 10 ** 400
+        self.put("alpha", tokens={"last_24h": syn.tokens_window(huge, huge, huge, huge),
+                                  "last_7d": syn.tokens_window(huge, huge, huge, huge), "by_day": []})
+        self.put("beta")
+        s = self.read()
+        h = self.host(s, "alpha")
+        self.assertEqual((h.out_24h, h.out_7d, h.cache_24h, h.cache_7d), (None,) * 4)
+        self.assertEqual(self.host(s, "beta").out_24h, 412000)
+
     def test_wrong_typed_fields_are_not_trusted(self):
         snap = make_snapshot("alpha", sessions={"busy": "2", "waiting": True})
         self.put("alpha", snap)
