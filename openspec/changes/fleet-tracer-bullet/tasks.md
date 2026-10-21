@@ -8,10 +8,10 @@ Tracer-bullet order: 1-2 collect on one machine, 3 push to a hub, 4 minimal view
 
 Files: `bin/grid-fleet`, `grid_fleet/__init__.py`, `grid_fleet/cli.py`, `grid_fleet/config.py`, `tests/helpers/claude_tree.py`, `tests/test_config.py`, `tests/test_cli.py`.
 
-- [ ] 1.1 `bin/grid-fleet` (`#!/usr/bin/env python3`, executable) calling `grid_fleet.cli.main`; argparse subcommands `collect`, `push`, `view`, `install` and internal `tap`; `--version`.
-- [ ] 1.2 `config.py`: load JSON per `design.md`, defaults, host-name sanitiser, XDG paths, `GRID_FLEET_*` overrides, error on unknown `schema`, ignore unknown keys.
-- [ ] 1.3 `tests/helpers/claude_tree.py`: builds a synthetic Claude dir (projects, main and subagent transcripts, meta files) and a fake `claude` executable emitting canned `agents --json`. Synthetic names only.
-- [ ] 1.4 Static guard test: no file under `grid_fleet/` uses `match` statements, `X | Y` annotations evaluated at runtime, or imports outside the stdlib (parse with `ast`).
+- [x] 1.1 `bin/grid-fleet` (`#!/usr/bin/env python3`, executable) calling `grid_fleet.cli.main`; argparse subcommands `collect`, `push`, `view`, `install` and internal `tap`; `--version`.
+- [x] 1.2 `config.py`: load JSON per `design.md`, defaults, host-name sanitiser, XDG paths, `GRID_FLEET_*` overrides, error on unknown `schema`, ignore unknown keys.
+- [x] 1.3 `tests/helpers/claude_tree.py`: builds a synthetic Claude dir (projects, main and subagent transcripts, meta files) and a fake `claude` executable emitting canned `agents --json`. Synthetic names only.
+- [x] 1.4 Static guard test: no file under `grid_fleet/` uses `match` statements, `X | Y` annotations evaluated at runtime, or imports outside the stdlib (parse with `ast`).
 
 Acceptance: config defaults, bad schema, host-name sanitising (`../x; rm -rf ~` becomes a safe name) tested; guard test passes under 3.9.
 Verify: default verify command.
