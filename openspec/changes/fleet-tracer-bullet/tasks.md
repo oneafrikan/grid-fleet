@@ -39,7 +39,7 @@ Files: `grid_fleet/push.py`, `grid_fleet/hub.py` (inbox path helpers only), `tes
 - [x] 3.1 `push.py`: ssh delivery with the upload script from `design.md`, `BatchMode`/`ConnectTimeout`, local-hub mode, re-collect when the snapshot is older than `interval_s`, one-line failure log.
 - [x] 3.2 Fake `ssh` executable for tests (runs the received script locally against a temp HOME); asserts the argv and options.
 - [x] 3.3 Tests for every scenario in `specs/push-transport/spec.md`: success, unreachable, missing `hub`, interrupted upload (kill mid-stream leaves old file intact), local hub spawns no ssh, hostile host name.
-- [ ] 3.4 HUMAN: run `collect` then `push` from one real machine to a real hub alias; confirm `<host>.json` appears in the hub inbox. Record the result (no hostnames) in `docs/spikes.md`.
+- [x] 3.4 HUMAN: run `collect` then `push` from one real machine to a real hub alias; confirm `<host>.json` appears in the hub inbox. Record the result (no hostnames) in `docs/spikes.md`. (done 2026-10-21, see docs/spikes.md)
 
 Acceptance: push delivers the snapshot through the fake ssh into a temp inbox atomically; failure paths exit non-zero and keep the local snapshot.
 Verify: default verify command.

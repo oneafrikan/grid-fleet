@@ -18,8 +18,7 @@
 - 2.2 capture a real `waiting` row
 - 2.1 `CLAUDE_CONFIG_DIR` sub-check: set it to a temp dir, start a throwaway session, record yes/no in `docs/spikes.md`
 - 2.8 reference-machine cold/warm collect timing
-- 3.4 real collect + push to a real hub
-- 4.5 view layout check at 80x24 and 120x40
+- 4.5 view check in a real terminal: colours and live resize (text-capture layout check at 120x40 and 80x24 is done, see `docs/spikes.md`)
 - Group 5 tracer-bullet checkpoint (two real machines)
 - 7.2 real fresh-session observation of missing `rate_limits`
 - 8.1 timers-across-sleep spike (macOS and Linux)
@@ -36,6 +35,8 @@
 5. `validate_hub` rejects a leading `-`, whitespace and control characters only; shell metacharacters pass (harmless in grid-fleet, no shell is involved, but a user `ProxyCommand` using `%h` could expand them).
 6. `tests/test_guard.py` scans `grid_fleet/` only, not `bin/grid-fleet`, and checks only `match`, `X | Y` annotations and imports.
 7. The upload completeness check catches truncation, not every short stream that ends in a newline (tool-written snapshots are one line plus a newline, so the known gap cannot occur for them).
+8. `claude` is not on the non-interactive ssh PATH on hosts that install it in `~/.local/bin`, so `sessions` is null with warning `claude agents unavailable`. Timers will hit the same thing. The Group 8 installer must record the install-time PATH, and tests should cover it. Config has no `claude` path key; only `GRID_FLEET_CLAUDE_BIN` or PATH can fix it.
+9. Add the verified Claude Code version to the tested list at 9.4 (currently warns on 2.1.306).
 
 ## Remote
 
