@@ -1,0 +1,127 @@
+"""Builders for synthetic schema-1 snapshots and hub inbox files (design.md "Snapshot").
+
+Everything here is invented data (hosts like alpha / beta); nothing reads a real
+Claude tree or a real inbox. The hub tests and the render tests share it.
+
+    make_snapshot(host, **overrides) -> dict      a full, valid schema-1 snapshot
+    NULL                                          pass as a section value to get JSON null
+    write_inbox_file(state_dir, name, obj, mtime) write inbox/<name>.json, then os.utime
+    snapshot_tree(state_dir)                      {relpath: (bytes, mtime_ns)} for read-only checks
+"""
+
+import json
+import os
+from typing import Dict, Optional, Tuple, Union
+
+# Fixed "hub now" used across the tests (epoch seconds). Matches the design sketch's
+# collected_at plus three minutes, so a file written at COLLECTED_AT is 3m old.
+COLLECTED_AT = 1792580580
+NOW = COLLECTED_AT + 180
+
+
+class _Null(object):
+    """Marker: 'make this section JSON null' (None means 'use the default' instead)."""
+
+    def __repr__(self) -> str:
+        return "NULL"
+
+
+NULL = _Null()
+
+
+def _pick(value, default):
+    if value is NULL:
+        return None
+    return default if value is None else value
+
+
+def tokens_window(output=0, input=0, cache_creation=0, cache_read=0) -> dict:
+    return {
+        "output": output,
+        "input": input,
+        "cache_creation": cache_creation,
+        "cache_read": cache_read,
+    }
+
+
+def make_snapshot(
+    host: str = "alpha",
+    *,
+    account: str = "default",
+    collected_at: int = COLLECTED_AT,
+    interval_s: int = 600,
+    sessions=None,
+    tokens=None,
+    agents=None,
+    limits=None,
+    warnings=None,
+    schema: int = 1
+) -> dict:
+    """A valid snapshot. Pass NULL for sessions/tokens/limits/agents to get JSON null.
+
+    Defaults mirror the design.md example: 2 busy, 1 waiting, 412k output in 24h.
+    """
+    default_sessions = {"busy": 2, "waiting": 1, "idle": 0, "other": 0, "total": 3}
+    default_tokens = {
+        "last_24h": tokens_window(412000, 91000, 1200000, 55000000),
+        "last_7d": tokens_window(3100000, 640000, 9000000, 420000000),
+        "by_day": [],
+    }
+    return {
+        "schema": schema,
+        "agent": "claude",
+        "agent_version": "0.0.0-test",
+        "host": host,
+        "account": account,
+        "collected_at": collected_at,
+        "interval_s": interval_s,
+        "sessions": _pick(sessions, default_sessions),
+        "tokens": _pick(tokens, default_tokens),
+        "agents": _pick(agents, {"last_7d": []}),
+        "limits": None if limits is NULL else limits,  # default null: no limits captured
+        "warnings": warnings or [],
+    }
+
+
+def write_inbox_file(
+    state_dir: str,
+    name: str,
+    obj: Union[dict, str, bytes],
+    mtime: Optional[int] = None,
+) -> str:
+    """Write inbox/<name> (name includes any extension) with the chosen mtime.
+
+    `obj` may be a dict (dumped as JSON) or raw str/bytes (to fabricate corrupt files).
+    The mtime is set with os.utime because staleness is judged from it, not from the
+    snapshot's own collected_at.
+    """
+    d = os.path.join(state_dir, "inbox")
+    os.makedirs(d, exist_ok=True)
+    path = os.path.join(d, name)
+    if isinstance(obj, dict):
+        data = json.dumps(obj).encode("utf-8")
+    elif isinstance(obj, str):
+        data = obj.encode("utf-8")
+    else:
+        data = obj
+    with open(path, "wb") as fh:
+        fh.write(data)
+    if mtime is not None:
+        os.utime(path, (mtime, mtime))
+    return path
+
+
+def snapshot_tree(root: str) -> Dict[str, Tuple[bytes, int]]:
+    """Every file under root as {relative path: (content, mtime_ns)}; plus dirs as None-content.
+
+    Used to prove a code path is read-only: take one before, one after, compare.
+    """
+    out = {}  # type: Dict[str, Tuple[bytes, int]]
+    for dirpath, dirnames, filenames in os.walk(root):
+        rel_dir = os.path.relpath(dirpath, root)
+        out[rel_dir + "/"] = (b"", 0)  # a created or removed directory shows up too
+        for fn in filenames:
+            p = os.path.join(dirpath, fn)
+            with open(p, "rb") as fh:
+                out[os.path.relpath(p, root)] = (fh.read(), os.stat(p).st_mtime_ns)
+    return out

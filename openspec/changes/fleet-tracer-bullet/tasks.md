@@ -48,10 +48,10 @@ Verify: default verify command.
 
 Files: `grid_fleet/hub.py` (inbox reader, staleness), `grid_fleet/view.py`, `tests/test_hub.py`, `tests/test_view_render.py`.
 
-- [ ] 4.1 `hub.py`: read inbox with the skip rules, compute staleness from file mtime, per-host and total aggregation excluding stale hosts, `expected_hosts`.
-- [ ] 4.2 `view.py`: render function separated from curses I/O (takes state + width/height, returns lines with attribute tags) so it is testable without a terminal. Hosts table (busy, waiting, output 24h/7d, muted in+cache line, age), total row, footer, `unknown` rendering, token formatter, ASCII fallback, `NO_COLOR`.
-- [ ] 4.3 Curses loop: refresh by mtime poll, `q`/`r`, resize, too-small message, terminal restored on exit and on exception.
-- [ ] 4.4 Tests on the render function for staleness, never-reported, null sections, totals excluding stale hosts, ASCII mode, narrow width; test that `view` opens no sockets and leaves inbox files untouched.
+- [x] 4.1 `hub.py`: read inbox with the skip rules, compute staleness from file mtime, per-host and total aggregation excluding stale hosts, `expected_hosts`.
+- [x] 4.2 `view.py`: render function separated from curses I/O (takes state + width/height, returns lines with attribute tags) so it is testable without a terminal. Hosts table (busy, waiting, output 24h/7d, muted in+cache line, age), total row, footer, `unknown` rendering, token formatter, ASCII fallback, `NO_COLOR`.
+- [x] 4.3 Curses loop: refresh by mtime poll, `q`/`r`, resize, too-small message, terminal restored on exit and on exception.
+- [x] 4.4 Tests on the render function for staleness, never-reported, null sections, totals excluding stale hosts, ASCII mode, narrow width; test that `view` opens no sockets and leaves inbox files untouched.
 - [ ] 4.5 HUMAN: run `grid-fleet view` on the hub against the real inbox; confirm the layout is readable at 80x24 and 120x40. Record screenshots-as-text in `docs/spikes.md`.
 
 Acceptance: view renders hosts from a temp inbox; a 41-minute-old file shows grey `unknown` and is not in the total.
