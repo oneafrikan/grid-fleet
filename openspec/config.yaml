@@ -1,32 +1,33 @@
 schema: spec-driven
 
-# Project context (optional)
-# This is shown to AI when creating artifacts.
-# Add your tech stack, conventions, style guides, domain knowledge, etc.
-# Example:
-#   context: |
-#     Tech stack: TypeScript, React, Node.js
-#     We use conventional commits
-#     Domain: e-commerce platform
+# Project context shown to every agent that drafts or applies a change here.
+context: |
+  grid-fleet is a btop-style terminal dashboard (Python, stdlib only) showing,
+  across a personal fleet of machines, Claude Code session counts (busy/waiting),
+  token usage, subagent-type usage and the Max-plan 5h/7d limits.
 
-# Per-artifact rules (optional)
-# Add custom rules for specific artifacts.
-# Example:
-#   rules:
-#     proposal:
-#       - Keep proposals under 500 words
-#       - Always include a "Non-goals" section
-#     tasks:
-#       - Break tasks into chunks of max 2 hours
+  Non-negotiables:
+  - Python stdlib only, zero dependencies; must run on stock macOS Python 3.9.6
+    (JSON config, no tomllib, no `match`, no `X | Y` runtime types) and on Linux.
+  - Verify Python with /usr/bin/python3 on macOS; the Homebrew python3 on PATH is newer.
+  - Push architecture: spokes collect and push over plain ssh; the hub needs only sshd.
+  - Terminal UI only in v1. Claude only in v1 (snapshot has `agent: "claude"`).
+  - The repo is public-bound: no machine names, IPs, accounts or home paths in any
+    tracked file; fixtures are synthetic.
+  - Privacy by default: cwd, session names and project names never leave a host
+    unless the user opts in. Transcript text is never read into output or logs.
+  - Never edit a user's ~/.claude/settings.json except via `install`, after showing
+    the exact change and getting confirmation.
+  - Stale data renders as grey "unknown", never as zero.
+  - Comment code generously; keep README and CLAUDE.md true to the code.
 
-# Per-operation guidance (optional)
-# Add advisory guidance for how apply and archive work should be conducted.
-# This is separate from artifact rules above.
-# Example:
-#   operations:
-#     apply:
-#       guidance:
-#         - Keep test summaries concise
-#     archive:
-#       guidance:
-#         - Summarize the archive outcome before finishing
+rules:
+  proposal:
+    - Include a "Non-goals" section.
+  tasks:
+    - Each "## N." group must be independently implementable in one PR; list files
+      to touch, the acceptance test and the verify command.
+    - Default verify command is `/usr/bin/python3 -m unittest discover -s tests` on macOS
+      (system Python 3.9) and `python3 -m unittest discover -s tests` on Linux.
+    - Record every judgement call as "Decided:" in design.md. Tasks needing human
+      taste say "HUMAN:" in the title. Spike tasks state a pass/fail criterion.
