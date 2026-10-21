@@ -67,20 +67,32 @@ LOCAL_HUB = "local"
 #
 #   umask 077         -> files are 0600
 #   cat > .H.json.tmp -> the in-flight upload lives in a dot-file readers ignore
+#   [ ... -eq 1 ]     -> completeness check: only rename if the tmp file ends in
+#                        "\n". Snapshots are always written as JSON + "\n"
+#                        (sources_claude.atomic_write_json). If the client drops
+#                        mid-stream, sshd closes the remote stdin, `cat` sees a
+#                        clean EOF and exits 0, so without this check `mv` would
+#                        replace the good <host>.json with a TRUNCATED file.
+#                        `tail -c 1 | wc -l` is 1 only when the last byte is a
+#                        newline (0 for an empty file). `wc -l` pads its number
+#                        with spaces on macOS/BSD; `[ -eq ]` compares as integers
+#                        so the padding is harmless. Known residual limit: a
+#                        stream cut exactly after an inner newline passes. The
+#                        check catches truncation, not every short stream.
 #   mv                -> atomic rename over the previous <host>.json
 UPLOAD_SCRIPT = (
     'umask 077; d="${XDG_STATE_HOME:-$HOME/.local/state}/grid-fleet/inbox"; '
-    'mkdir -p "$d" && cat > "$d/.@HOST@.json.tmp" && mv "$d/.@HOST@.json.tmp" "$d/@HOST@.json"'
+    'mkdir -p "$d" && cat > "$d/.@HOST@.json.tmp" && '
+    '[ "$(tail -c 1 "$d/.@HOST@.json.tmp" | wc -l)" -eq 1 ] && '
+    'mv "$d/.@HOST@.json.tmp" "$d/@HOST@.json"'
 )
 
 # Whitespace or ASCII control chars (incl. DEL) anywhere in the alias.
 _BAD_ALIAS_CHARS = re.compile(r"[\s\x00-\x1f\x7f]")
-# How much of ssh's own first stderr line we echo into our one-line log.
-_REASON_MAX = 80
 
 
 class PushError(Exception):
-    """Delivery failed. str(exc) is a single sanitised line, safe to print."""
+    """Delivery failed. str(exc) is a single line (reason class + exit code only), safe to print."""
 
 
 def validate_hub(hub_value: object) -> Optional[str]:
@@ -134,6 +146,11 @@ def _read_stored(config) -> Optional[bytes]:
     age = cfg.now() - collected
     if age < 0 or age > config.interval_s:
         return None
+    # write_snapshot always ends the file with "\n"; the hub-side completeness
+    # check relies on that. A file without it (hand-edited, truncated) is not
+    # trusted: re-collect rather than send bytes the hub would refuse.
+    if not data.endswith(b"\n"):
+        return None
     return data
 
 
@@ -178,19 +195,6 @@ def deliver_local(config, data: bytes) -> None:
         raise
 
 
-def _short_reason(stderr: bytes) -> str:
-    """First line of ssh's stderr reduced to printable ASCII, capped.
-
-    ssh's message is the only clue why a timer-driven push failed ("Permission
-    denied (publickey)"), so a short version is kept; control characters are
-    stripped so it cannot forge extra log lines.
-    """
-    text = stderr.decode("utf-8", "replace")
-    first = text.strip().splitlines()[0] if text.strip() else ""
-    first = re.sub(r"[^\x20-\x7e]", "?", first)
-    return first[:_REASON_MAX]
-
-
 def deliver_ssh(config, data: bytes) -> None:
     """Run ssh once with `data` on stdin. Raises PushError; never retries."""
     argv = [
@@ -214,11 +218,10 @@ def deliver_ssh(config, data: bytes) -> None:
         # e.g. ssh not on PATH. strerror only: str(exc) can carry paths.
         raise PushError("push failed (cannot run ssh: %s); local snapshot kept" % (exc.strerror or "error"))
     if proc.returncode != 0:
-        why = _short_reason(proc.stderr)
-        raise PushError(
-            "push failed (ssh exit %d%s); local snapshot kept"
-            % (proc.returncode, ": " + why if why else "")
-        )
+        # Reason class + exit code only. ssh's own stderr is deliberately NOT
+        # echoed: it can carry host names, addresses and key paths, and this
+        # line lands in timer logs.
+        raise PushError("push failed (ssh exit %d); local snapshot kept" % proc.returncode)
 
 
 # --- command ----------------------------------------------------------------
