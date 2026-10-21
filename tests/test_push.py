@@ -1,0 +1,489 @@
+"""Tests for `push` (Group 3): one test group per scenario in specs/push-transport/spec.md.
+
+Real ssh is never run. tests/helpers/fake_ssh.py puts an executable `ssh` first on PATH that
+runs the received remote command locally against a temp HOME, so the "hub inbox" is a temp
+dir. HOME is also pointed at a temp dir for every test, so nothing can reach a real ~/.ssh.
+The synthetic Claude tree and GRID_FLEET_NOW keep collection off the real ~/.claude and the
+real clock.
+
+These are the author's own self-checks, not independent verification.
+"""
+
+import ast
+import contextlib
+import dataclasses
+import io
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import unittest
+from unittest import mock
+
+from helpers.claude_tree import ClaudeTree, agent_row, usage_event
+from helpers.fake_ssh import FakeSsh
+from helpers.synthetic_snapshot import COLLECTED_AT, make_snapshot
+
+from grid_fleet import config as cfg
+from grid_fleet import hub, push, snapshot
+
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+BIN = os.path.join(REPO, "bin", "grid-fleet")
+
+# Fixed clock shared with the other test modules' style: 2026-10-21T14:03:00Z.
+NOW = 1792591380
+INTERVAL = 600
+ALIAS = "hub-alias"
+
+
+class PushBase(unittest.TestCase):
+    def setUp(self):
+        self.work = tempfile.mkdtemp(prefix="gf-push-")
+        self.addCleanup(shutil.rmtree, self.work, True)
+        self.home = os.path.join(self.work, "home")  # a HOME with no .ssh in it
+        os.makedirs(self.home)
+        self.state = os.path.join(self.work, "state")
+        self.tree = ClaudeTree()
+        self.addCleanup(self.tree.cleanup)
+        self.ssh = FakeSsh()
+        self.addCleanup(self.ssh.cleanup)
+        env = self.ssh.env({"GRID_FLEET_NOW": str(NOW), "HOME": self.home})
+        patcher = mock.patch.dict(os.environ, env)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        # Belt and braces: the ssh a push would run must be the fake, never a real one.
+        self.assertEqual(shutil.which("ssh"), os.path.join(self.ssh.bin_dir, "ssh"))
+        self.config = self.make_config({"hub": ALIAS})
+
+    # -- helpers -----------------------------------------------------------
+    def config_env(self, config_json):
+        body = {"schema": 1, "host_name": "alpha", "interval_s": INTERVAL}
+        body.update(config_json)
+        cfg_path = os.path.join(self.work, "config-%d.json" % len(os.listdir(self.work)))
+        with open(cfg_path, "w") as fh:
+            json.dump(body, fh)
+        return self.tree.env({"GRID_FLEET_STATE_DIR": self.state, "GRID_FLEET_CONFIG": cfg_path})
+
+    def make_config(self, config_json=None):
+        return cfg.load_config(self.config_env(config_json or {}))
+
+    def snap_path(self):
+        return snapshot.snapshot_path(self.config)
+
+    def store_snapshot(self, age=60, **overrides):
+        """Write a stored snapshot.json `age` seconds old; return its exact bytes."""
+        snap = make_snapshot("alpha", collected_at=NOW - age, interval_s=INTERVAL, **overrides)
+        os.makedirs(self.state, exist_ok=True)
+        data = (json.dumps(snap) + "\n").encode("utf-8")
+        with open(self.snap_path(), "wb") as fh:
+            fh.write(data)
+        return data
+
+    def local_snapshot(self):
+        with open(self.snap_path(), "rb") as fh:
+            return fh.read()
+
+    def run_push(self, config=None):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = push.push_main(config or self.config, None)
+        return rc, out.getvalue(), err.getvalue()
+
+    def seed_hub(self, host, content):
+        """Pre-existing good <host>.json on the fake hub (the 'previous file')."""
+        os.makedirs(self.ssh.inbox_dir(), exist_ok=True)
+        with open(os.path.join(self.ssh.inbox_dir(), host + ".json"), "wb") as fh:
+            fh.write(content)
+
+
+class TestPushOverSsh(PushBase):
+    def test_successful_push(self):
+        data = self.store_snapshot()
+        rc, out, err = self.run_push()
+        self.assertEqual((rc, err), (0, ""))
+        self.assertEqual(self.ssh.read_inbox("alpha"), data)
+        self.assertEqual(self.ssh.inbox_files(), ["alpha.json"])  # no tmp left behind
+        self.assertEqual(len(self.ssh.calls()), 1)
+        # umask 077 in the upload script: the hub copy is owner-only.
+        mode = os.stat(os.path.join(self.ssh.inbox_dir(), "alpha.json")).st_mode & 0o777
+        self.assertEqual(mode, 0o600)
+        # A fresh stored snapshot is sent as is: no needless re-collect.
+        self.assertEqual(self.tree.calls(), [])
+        # Success output is at most one short line.
+        self.assertLessEqual(len(out.strip().splitlines()), 1)
+
+    def test_non_interactive_ssh(self):
+        self.store_snapshot()
+        self.run_push()
+        (argv,) = self.ssh.calls()
+        # Exact shape: options, alias, ONE remote-command word.
+        self.assertEqual(argv[:4], ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10"])
+        self.assertEqual(argv[4], ALIAS)
+        self.assertEqual(len(argv), 6)
+        self.assertTrue(argv[5].startswith("sh -c '"))
+        self.assertTrue(argv[5].endswith("'"))
+        self.assertNotIn("\n", argv[5])
+        # The upload script from design.md, with H = the host name.
+        self.assertIn('mkdir -p "$d" && cat > "$d/.alpha.json.tmp" && mv "$d/.alpha.json.tmp" "$d/alpha.json"', argv[5])
+        self.assertIn("umask 077", argv[5])
+
+    def test_hub_unreachable(self):
+        data = self.store_snapshot()
+        self.ssh.set_mode("fail", code=255)
+        rc, out, err = self.run_push()
+        self.assertNotEqual(rc, 0)
+        self.assertEqual(self.local_snapshot(), data)  # local snapshot kept
+        self.assertEqual(len(err.strip().splitlines()), 1, err)  # one-line reason
+        self.assertIn("255", err)
+        self.assertEqual(len(self.ssh.calls()), 1)  # no retry loop
+        self.assertEqual(self.ssh.inbox_files(), [])
+        self.assertEqual(out, "")
+
+    def test_failure_log_line_is_sanitised_and_short(self):
+        self.store_snapshot()
+        self.ssh.set_mode("fail")
+        _, _, err = self.run_push()
+        # Control characters in ssh's stderr cannot forge extra log lines.
+        line = push._short_reason(b"boom\x1b[31m\nsecond line\n" + b"x" * 500)
+        self.assertNotIn("\x1b", line)
+        self.assertNotIn("second", line)
+        self.assertLessEqual(len(line), push._REASON_MAX)
+        self.assertLess(len(err), 200)
+
+    def test_ssh_timeout_is_a_failure_not_a_hang(self):
+        data = self.store_snapshot()
+        self.ssh.set_mode("hang")
+        with mock.patch.object(push, "SSH_TIMEOUT_S", 1):
+            rc, _, err = self.run_push()
+        self.assertNotEqual(rc, 0)
+        self.assertIn("timeout", err)
+        self.assertEqual(len(err.strip().splitlines()), 1)
+        self.assertEqual(len(self.ssh.calls()), 1)
+        self.assertEqual(self.local_snapshot(), data)
+
+    def test_ssh_binary_missing_is_a_failure(self):
+        data = self.store_snapshot()
+        empty = os.path.join(self.work, "empty-path")
+        os.makedirs(empty)
+        with mock.patch.dict(os.environ, {"PATH": empty}):
+            rc, _, err = self.run_push()
+        self.assertNotEqual(rc, 0)
+        self.assertEqual(len(err.strip().splitlines()), 1)
+        self.assertIn("cannot run ssh", err)
+        self.assertEqual(self.local_snapshot(), data)
+
+    def test_end_to_end_through_the_cli(self):
+        # bin/grid-fleet push in a child process: cli wiring, exit code, env overrides.
+        data = self.store_snapshot()
+        env = dict(os.environ)
+        env.update(self.config_env({"hub": ALIAS}))
+        r = subprocess.run([sys.executable, BIN, "push"], capture_output=True, text=True, env=env)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.ssh.read_inbox("alpha"), data)
+
+
+class TestHubNotConfigured(PushBase):
+    def assert_nothing_ran(self):
+        self.assertEqual(self.ssh.calls(), [])  # ssh never invoked
+        self.assertEqual(self.tree.calls(), [])  # claude never invoked: nothing collected
+        self.assertFalse(os.path.exists(self.snap_path()))
+        self.assertFalse(os.path.exists(hub.inbox_dir(self.state)))
+
+    def test_missing_hub_names_the_key(self):
+        config = self.make_config({})  # no `hub`
+        self.assertIsNone(config.hub)
+        rc, out, err = self.run_push(config)
+        self.assertNotEqual(rc, 0)
+        self.assertIn("hub", err)
+        self.assertEqual(len(err.strip().splitlines()), 1)
+        self.assertEqual(out, "")
+        self.assert_nothing_ran()
+
+    def test_hostile_hub_aliases_are_refused(self):
+        # Option injection into ssh, and whitespace/control characters.
+        for bad in ("-oProxyCommand=touch /nope", "-J", "", "a b", "a\tb", "a\nb", "a\x00b", " hub", "hub "):
+            config = dataclasses.replace(self.config, hub=bad)
+            rc, _, err = self.run_push(config)
+            self.assertNotEqual(rc, 0, repr(bad))
+            self.assertIn("hub", err, repr(bad))
+            self.assertEqual(len(err.strip().splitlines()), 1, repr(bad))
+            self.assert_nothing_ran()
+
+    def test_plain_aliases_are_accepted(self):
+        for ok in ("hub-alias", "user@host.example", "h_1", "local"):
+            self.assertIsNone(push.validate_hub(ok), ok)
+
+
+class TestAtomicDelivery(PushBase):
+    """Spec 'Atomic delivery' / 'Interrupted upload'."""
+
+    OLD = b'{"schema":1,"previous":"good file"}\n'
+
+    def test_hub_dying_mid_transfer_leaves_previous_file(self):
+        # The remote command is killed while its `cat` is still reading: it never reaches `mv`.
+        # The previous file is intact; partial bytes exist only in the dot-prefixed temp file.
+        data = self.store_snapshot()
+        self.seed_hub("alpha", self.OLD)
+        self.ssh.set_mode("kill_remote", after=10)
+        rc, _, err = self.run_push()
+        self.assertNotEqual(rc, 0)
+        self.assertEqual(self.ssh.read_inbox("alpha"), self.OLD)
+        self.assertEqual(self.ssh.inbox_files(), [".alpha.json.tmp", "alpha.json"])
+        with open(os.path.join(self.ssh.inbox_dir(), ".alpha.json.tmp"), "rb") as fh:
+            partial = fh.read()
+        self.assertEqual(partial, data[:10])
+        self.assertEqual(len(self.ssh.calls()), 1)
+
+    # FINDING (reported to the tech lead; a design change, not fixed here):
+    # when the CLIENT connection drops mid-stream, sshd closes the remote command's stdin, so
+    # `cat` sees a clean EOF after the partial bytes and exits 0, and the design's script runs
+    # `mv` anyway, renaming the TRUNCATED tmp file over the good <host>.json. The scenario
+    # requires the previous file to stay unchanged; the design's script does not deliver that.
+    # Marked expectedFailure so the suite stays green while the finding is open. When the
+    # design gains a completeness check before `mv`, this starts "unexpectedly succeeding"
+    # (unittest reports that as a failure): remove the decorator then.
+    @unittest.expectedFailure
+    def test_client_dropping_mid_stream_leaves_previous_file(self):
+        self.store_snapshot()
+        self.seed_hub("alpha", self.OLD)
+        self.ssh.set_mode("die", after=10)
+        rc, _, _ = self.run_push()
+        self.assertNotEqual(rc, 0)
+        self.assertEqual(self.ssh.read_inbox("alpha"), self.OLD)
+
+    def test_client_dropping_mid_stream_evidence(self):
+        # Not an assertion about desired behaviour: pins down what the design's script does
+        # today, so the finding above is reproducible from the suite output.
+        data = self.store_snapshot()
+        self.seed_hub("alpha", self.OLD)
+        self.ssh.set_mode("die", after=10)
+        self.run_push()
+        got = self.ssh.read_inbox("alpha")
+        self.assertEqual(got, data[:10])  # truncated bytes replaced the good file
+        self.assertNotEqual(got, self.OLD)
+        with self.assertRaises(ValueError):
+            json.loads(got.decode("utf-8"))
+
+    def test_partial_data_only_in_dot_prefixed_tmp_name(self):
+        # Whatever happens, the in-flight name is a dot-file readers ignore.
+        self.assertIn('.alpha.json.tmp', push.remote_command("alpha"))
+        self.assertEqual(os.path.basename(hub.inbox_tmp_path("/s", "alpha")), ".alpha.json.tmp")
+
+
+class TestLocalHub(PushBase):
+    def test_hub_is_this_machine(self):
+        data = self.store_snapshot()
+        config = dataclasses.replace(self.config, hub="local")
+        rc, out, err = self.run_push(config)
+        self.assertEqual((rc, err), (0, ""))
+        path = hub.inbox_path(self.state, "alpha")
+        with open(path, "rb") as fh:
+            self.assertEqual(fh.read(), data)
+        self.assertEqual(self.ssh.calls(), [])  # no ssh process started
+        self.assertEqual(sorted(os.listdir(hub.inbox_dir(self.state))), ["alpha.json"])
+        self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
+        self.assertEqual(os.stat(hub.inbox_dir(self.state)).st_mode & 0o777, 0o700)
+
+    def test_local_write_is_atomic(self):
+        # If the final rename fails, the previous file is untouched and no tmp is left over.
+        self.store_snapshot()
+        config = dataclasses.replace(self.config, hub="local")
+        os.makedirs(hub.inbox_dir(self.state))
+        old = b'{"schema":1,"previous":"good file"}\n'
+        with open(hub.inbox_path(self.state, "alpha"), "wb") as fh:
+            fh.write(old)
+        with mock.patch("grid_fleet.push.os.replace", side_effect=OSError(5, "synthetic")):
+            rc, _, err = self.run_push(config)
+        self.assertNotEqual(rc, 0)
+        self.assertEqual(len(err.strip().splitlines()), 1)
+        with open(hub.inbox_path(self.state, "alpha"), "rb") as fh:
+            self.assertEqual(fh.read(), old)
+        self.assertEqual(os.listdir(hub.inbox_dir(self.state)), ["alpha.json"])
+
+    def test_local_replaces_previous_file(self):
+        data = self.store_snapshot()
+        config = dataclasses.replace(self.config, hub="local")
+        os.makedirs(hub.inbox_dir(self.state))
+        with open(hub.inbox_path(self.state, "alpha"), "wb") as fh:
+            fh.write(b"old")
+        self.assertEqual(self.run_push(config)[0], 0)
+        with open(hub.inbox_path(self.state, "alpha"), "rb") as fh:
+            self.assertEqual(fh.read(), data)
+
+
+class TestFreshDataOnly(PushBase):
+    def seed_claude(self):
+        self.tree.add_session("proj-a", "sess-1", [usage_event(NOW - 60, output=123)])
+        self.tree.set_agents([agent_row(status="busy")])
+        for root, _d, files in os.walk(self.tree.projects_dir):
+            for f in files:
+                self.tree.set_mtime(os.path.join(root, f), NOW)
+
+    def test_old_local_snapshot_is_recollected(self):
+        self.seed_claude()
+        self.store_snapshot(age=INTERVAL + 1, warnings=["stale-marker"])
+        rc, _, err = self.run_push()
+        self.assertEqual((rc, err), (0, ""))
+        delivered = self.ssh.read_inbox("alpha")
+        snap = json.loads(delivered.decode("utf-8"))
+        self.assertEqual(snap["collected_at"], NOW)  # new, not NOW - 601
+        self.assertNotIn("stale-marker", snap["warnings"])
+        self.assertEqual(snap["tokens"]["last_24h"]["output"], 123)
+        self.assertEqual(snap["sessions"]["busy"], 1)
+        self.assertEqual(delivered, self.local_snapshot())  # hub copy == refreshed local file
+        self.assertNotEqual(self.tree.calls(), [])  # the collector really ran
+
+    def test_snapshot_exactly_interval_old_is_still_fresh(self):
+        # Spec: "older than interval_s" is stale; equal is not.
+        data = self.store_snapshot(age=INTERVAL)
+        self.assertEqual(self.run_push()[0], 0)
+        self.assertEqual(self.ssh.read_inbox("alpha"), data)
+        self.assertEqual(self.tree.calls(), [])
+
+    def test_missing_corrupt_or_future_snapshot_is_recollected(self):
+        self.seed_claude()
+        # missing
+        self.assertEqual(self.run_push()[0], 0)
+        self.assertEqual(json.loads(self.ssh.read_inbox("alpha").decode())["collected_at"], NOW)
+        # corrupt
+        with open(self.snap_path(), "w") as fh:
+            fh.write("{not json")
+        self.assertEqual(self.run_push()[0], 0)
+        self.assertEqual(json.loads(self.local_snapshot().decode())["collected_at"], NOW)
+        # dated in the future (clock jump): not trusted either
+        self.store_snapshot(age=-3600, warnings=["future-marker"])
+        self.assertEqual(self.run_push()[0], 0)
+        self.assertNotIn(b"future-marker", self.ssh.read_inbox("alpha"))
+
+    def test_recollect_failure_is_reported_and_nothing_is_sent(self):
+        # State dir cannot be written -> cannot produce a fresh snapshot -> send nothing.
+        os.makedirs(self.state)
+        os.chmod(self.state, 0o500)
+        self.addCleanup(os.chmod, self.state, 0o700)
+        if os.access(self.state, os.W_OK):
+            self.skipTest("running as a user that ignores directory permissions")
+        rc, _, err = self.run_push()
+        self.assertNotEqual(rc, 0)
+        self.assertEqual(len(err.strip().splitlines()), 1)
+        self.assertEqual(self.ssh.calls(), [])
+
+
+class TestHostNameSafety(PushBase):
+    HOSTILE = "../x; rm -rf ~"
+    SAFE = "_x__rm_-rf__"  # sanitiser: bad chars -> "_", leading dots stripped
+
+    def test_config_sanitises_hostile_host_name(self):
+        config = self.make_config({"hub": ALIAS, "host_name": self.HOSTILE})
+        self.assertEqual(config.host_name, self.SAFE)
+
+    def test_hostile_name_over_ssh_writes_only_inside_inbox(self):
+        # Build the Config by hand with the RAW name: push must sanitise on its own,
+        # not trust that config loading already did.
+        config = dataclasses.replace(self.config, host_name=self.HOSTILE)
+        self.store_snapshot()
+        rc, _, err = self.run_push(config)
+        self.assertEqual((rc, err), (0, ""))
+        (argv,) = self.ssh.calls()
+        self.assertNotIn("rm -rf", argv[-1])
+        self.assertNotIn("..", argv[-1])
+        self.assertNotIn("~", argv[-1])
+        self.assertEqual(self.ssh.inbox_files(), [self.SAFE + ".json"])
+        # Nothing else was created anywhere under the hub's HOME (e.g. no <inbox>/../x.json).
+        written = []
+        for root, _d, files in os.walk(self.ssh.hub_home):
+            written += [os.path.join(root, f) for f in files]
+        self.assertEqual(written, [os.path.join(self.ssh.inbox_dir(), self.SAFE + ".json")])
+        self.assertFalse(os.path.exists(os.path.join(self.work, "x")))
+
+    def test_hostile_name_local_writes_only_inside_inbox(self):
+        config = dataclasses.replace(self.config, host_name=self.HOSTILE, hub="local")
+        self.store_snapshot()
+        self.assertEqual(self.run_push(config)[0], 0)
+        self.assertEqual(os.listdir(hub.inbox_dir(self.state)), [self.SAFE + ".json"])
+        # state dir holds only the snapshot and the inbox: nothing escaped upward.
+        self.assertEqual(sorted(os.listdir(self.state)), ["inbox", "snapshot.json"])
+        self.assertFalse(os.path.exists(os.path.join(self.work, "x.json")))
+
+    def test_remote_command_contains_only_safe_host_characters(self):
+        for raw in (self.HOSTILE, "a'b", 'a"b', "$(id)", "a b", "`id`", "a\nb", "", "...", "ok-host_1.example"):
+            cmd = push.remote_command(raw)
+            # Exactly the three host slots, each filled with the same safe token.
+            host = cfg.sanitize_host_name(raw)
+            self.assertRegex(host, r"^[A-Za-z0-9_-][A-Za-z0-9._-]*$")
+            self.assertEqual(cmd.count(host + ".json"), 3, (raw, cmd))
+            self.assertEqual(cmd.count("'"), 2)  # only the wrapping quotes
+
+
+class TestNoCredentials(PushBase):
+    MARKERS = re.compile(
+        r"BEGIN [A-Z ]*(PRIVATE|OPENSSH)|PRIVATE KEY|ssh-(rsa|ed25519)|password|passphrase|\btoken\b",
+        re.IGNORECASE,
+    )
+
+    def test_no_credential_material_in_any_file_after_use(self):
+        # Normal use: collect, push over (fake) ssh, push to a local hub.
+        self.tree.add_session("proj-a", "sess-1", [usage_event(NOW - 60, output=5)])
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(snapshot.collect_main(self.config, None), 0)
+        self.assertEqual(self.run_push()[0], 0)
+        self.assertEqual(self.run_push(dataclasses.replace(self.config, hub="local"))[0], 0)
+        checked = 0
+        for root_dir in (self.work,):
+            for root, _d, files in os.walk(root_dir):
+                if root.startswith(self.tree.root) or root.startswith(self.ssh.bin_dir):
+                    continue  # test fixtures (fake claude/ssh scripts), not tool output
+                for f in files:
+                    path = os.path.join(root, f)
+                    with open(path, "rb") as fh:
+                        text = fh.read().decode("utf-8", "replace")
+                    self.assertIsNone(self.MARKERS.search(text), path)
+                    checked += 1
+        self.assertGreaterEqual(checked, 4)  # config, snapshot, local inbox, hub inbox
+
+    def test_push_never_opens_anything_under_dot_ssh(self):
+        self.store_snapshot()
+        opened = []
+        real_open, real_os_open = open, os.open
+
+        def spy_open(path, *a, **kw):
+            opened.append(str(path))
+            return real_open(path, *a, **kw)
+
+        def spy_os_open(path, *a, **kw):
+            opened.append(str(path))
+            return real_os_open(path, *a, **kw)
+
+        with mock.patch("builtins.open", spy_open), mock.patch("os.open", spy_os_open):
+            self.assertEqual(self.run_push()[0], 0)
+            self.assertEqual(self.run_push(dataclasses.replace(self.config, hub="local"))[0], 0)
+        self.assertTrue(opened)
+        self.assertEqual([p for p in opened if ".ssh" in p], [])
+
+    def test_module_source_never_references_ssh_key_material(self):
+        with open(push.__file__, encoding="utf-8") as fh:
+            tree = ast.parse(fh.read())
+        # Docstrings may mention ~/.ssh to say we do not read it; code strings may not.
+        docstrings = set()
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.Module, ast.FunctionDef, ast.ClassDef)):
+                body = node.body
+                if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant) \
+                        and isinstance(body[0].value.value, str):
+                    docstrings.add(id(body[0].value))
+        literals = [n.value for n in ast.walk(tree)
+                    if isinstance(n, ast.Constant) and isinstance(n.value, str) and id(n) not in docstrings]
+        for lit in literals:
+            for needle in (".ssh", "id_rsa", "id_ed25519", "known_hosts", "identity", "SSH_AUTH_SOCK", "askpass"):
+                self.assertNotIn(needle.lower(), lit.lower(), lit)
+        # And it starts exactly one kind of subprocess: the single subprocess.run (ssh).
+        calls = [n for n in ast.walk(tree) if isinstance(n, ast.Attribute)
+                 and isinstance(n.value, ast.Name) and n.value.id == "subprocess" and n.attr == "run"]
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(sum(1 for lit in literals if lit == "ssh"), 2)  # argv[0], success message
+
+
+if __name__ == "__main__":
+    unittest.main()
