@@ -105,7 +105,7 @@ Files: `README.md`, `CLAUDE.md`, `docs/architecture.md`, `docs/privacy.md`, `TOD
 
 - [ ] 9.1 README: install (clone + symlink), config example, quick start for spoke and hub, privacy section, status updated from "pre-alpha, spec approved, build not started".
 - [ ] 9.2 the-grid pointer (HUMAN-reviewed; separate change on its own branch in the-grid, NOT in this repo): add a short docs entry in the-grid linking to grid-fleet as an optional, independent companion. The grid-fleet README already links the other way. Do not touch the-grid's in-flight worktrees; branch from its current default.
-- [ ] 9.3 HUMAN: public-readiness check. Grep the tree for machine names, IPs, usernames, home paths, account names; confirm none; confirm fixtures are synthetic. Pass: zero hits. Then create `oneafrikan/grid-fleet` (public, MIT) and push. Only after groups 1-5 pass.
+- [ ] 9.3 HUMAN: public-readiness check. Grep the tree for machine names, IPs, usernames, home paths, account names; confirm none; confirm fixtures are synthetic. Pass: zero hits. Then create `oneafrikan/grid-fleet` (MIT) and push. A private remote first is acceptable; flip to public only after this grep passes. Only after groups 1-5 pass.
 - [ ] 9.4 Archive this change (`openspec archive fleet-tracer-bullet`) once the tasks above are done, and record the verified Claude Code version in the tested list.
 
 Acceptance: a stranger can clone, symlink, run `grid-fleet install` for a spoke and hub, and see a dashboard using only the README.

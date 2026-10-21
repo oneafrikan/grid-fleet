@@ -14,8 +14,9 @@ context: |
   - Terminal UI only in v1. Claude only in v1 (snapshot has `agent: "claude"`).
   - The repo is public-bound: no machine names, IPs, accounts or home paths in any
     tracked file; fixtures are synthetic.
-  - Privacy by default: cwd, session names and project names never leave a host
-    unless the user opts in. Transcript text is never read into output or logs.
+  - Privacy: cwd, session names, project directory names and session ids never
+    appear in a snapshot, whatever the config (no opt-in in v1). Transcript text
+    is never read into output or logs.
   - Never edit a user's ~/.claude/settings.json except via `install`, after showing
     the exact change and getting confirmation.
   - Stale data renders as grey "unknown", never as zero.
