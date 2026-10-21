@@ -53,6 +53,10 @@ Details: [`design.md`](openspec/changes/fleet-tracer-bullet/design.md), [`tasks.
 
 - [the-grid](https://github.com/oneafrikan/the-grid): a related agent toolkit. grid-fleet is independent of it and does not depend on it.
 
+## Acknowledgements
+
+The statusLine tap design (chain to the existing statusLine command, pass the environment and exit code through unchanged) was inspired by how Orca's statusLine hook works.
+
 ## Licence
 
 MIT. See `LICENSE`.

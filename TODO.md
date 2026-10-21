@@ -41,6 +41,7 @@
 
 - There is NO git remote yet.
 - When decided, create `oneafrikan/grid-fleet` (MIT). Private first is acceptable; flip to public only after the 9.3 grep passes (and groups 1-5 pass).
+- Docs follow-up: add the Orca project link to the README Acknowledgements once the human supplies the URL.
 
 ## Future decisions: outcomes roster (v2 idea, undecided)
 
