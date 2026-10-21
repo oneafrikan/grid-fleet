@@ -55,7 +55,7 @@ Details: [`design.md`](openspec/changes/fleet-tracer-bullet/design.md), [`tasks.
 
 ## Acknowledgements
 
-The statusLine tap design (chain to the existing statusLine command, pass the environment and exit code through unchanged) was inspired by how Orca's statusLine hook works.
+The statusLine tap design (chain to the existing statusLine command, pass the environment and exit code through unchanged) was inspired by how [Orca](https://www.onorca.dev/)'s statusLine hook works.
 
 ## Licence
 
