@@ -5,7 +5,7 @@ Deliver each host's latest snapshot to a hub the user chooses, over plain ssh, w
 ## ADDED Requirements
 
 ### Requirement: Push over ssh
-`grid-fleet push` SHALL send the latest snapshot to the hub identified by the `hub` config value, which is an ssh host alias, by running `ssh` with the snapshot on stdin so that it appears in the hub's inbox as `<host>.json`. The hub MUST need nothing installed beyond `sshd` and a POSIX shell.
+`grid-fleet push` SHALL send the latest snapshot to the hub identified by the `hub` config value, which is an ssh host alias, by running `ssh` with the snapshot on stdin so that it appears in the hub's inbox as `<host>.json`. The hub MUST need nothing installed beyond `sshd` and a POSIX shell. A `hub` value that is empty, starts with `-`, or contains whitespace or control characters MUST be rejected, so it can never be parsed as an ssh option.
 
 #### Scenario: Successful push
 - **WHEN** push runs with `hub` set to a reachable alias
@@ -18,17 +18,26 @@ Deliver each host's latest snapshot to a hub the user chooses, over plain ssh, w
 #### Scenario: Hub unreachable
 - **WHEN** ssh fails
 - **THEN** push exits non-zero, keeps the local snapshot, logs a one-line reason, and does not retry in a loop
+- **AND** the logged line contains only the reason class and exit code and MUST NOT echo ssh's own output, which may name the hub
+
+#### Scenario: Hostile hub alias
+- **WHEN** `hub` is `-oProxyCommand=x`
+- **THEN** push exits non-zero and runs nothing
 
 #### Scenario: Hub not configured
 - **WHEN** `hub` is absent from config
 - **THEN** push exits non-zero with a message naming the missing key and sends nothing
 
 ### Requirement: Atomic delivery
-The hub-side write MUST be atomic: a reader never observes a partial `<host>.json`.
+The hub-side write MUST be atomic: a reader never observes a partial `<host>.json`. The hub MUST NOT rename a temporary file that does not end in a newline.
 
 #### Scenario: Interrupted upload
 - **WHEN** the connection drops mid-transfer
 - **THEN** the previous `<host>.json` is unchanged and any partial data exists only in a dot-prefixed temporary file
+
+#### Scenario: Connection drops after partial bytes
+- **WHEN** the client connection drops after partial bytes and the hub sees end of input
+- **THEN** the previous `<host>.json` is unchanged and the partial data exists only in a dot-prefixed temporary file
 
 ### Requirement: Local hub
 When `hub` is `"local"`, push SHALL write into the local inbox using the same atomic rename and SHALL NOT invoke ssh.
@@ -45,7 +54,7 @@ Push SHALL NOT deliver a snapshot whose `collected_at` is older than `interval_s
 - **THEN** a new snapshot is collected and that is what is delivered
 
 ### Requirement: Host name safety
-Push MUST refuse to run if the host name contains characters outside `A-Za-z0-9._-` or starts with a dot, because it is used in a remote file name and command.
+Push MUST sanitise the host name to `A-Za-z0-9._-` (max 64 characters, no leading dot) before use, because it is used in a remote file name and command. It does not refuse to run.
 
 #### Scenario: Malicious host name
 - **WHEN** config sets `host_name` to `../x; rm -rf ~`

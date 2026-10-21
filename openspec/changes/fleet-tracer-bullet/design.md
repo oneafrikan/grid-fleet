@@ -101,13 +101,17 @@ One JSON object per host per collection. A section that could not be collected i
 
 ```json
 {"schema": 1, "files": {"<relpath under projects>": {"offset": 48211, "size": 48211, "agent": "core-researcher",
+   "bad": 0, "last": {"id": "<message.id>", "hour": "2026-10-21T14", "u": [412, 91, 1200, 55000]},
    "hours": {"2026-10-21T14": [412, 91, 1200, 55000]}}}}
 ```
 
 - Per file: the byte offset consumed, the agent label, and per-UTC-hour sums `[output, input, cache_creation, cache_read]`. Keys are relative paths under the Claude projects dir; the cache never leaves the host.
+- Two further per-file fields: `bad` is the cumulative count of skipped unparseable lines, so the corrupt-line warning survives warm runs. `last` is `{id, hour, u}` of the last counted message, so a streamed message split across two runs still collapses and a warm run equals a from-scratch recount.
+- Cache `schema` stays 1. The cache is host-local and never part of the snapshot.
 - Each run: list `*.jsonl` whose mtime is within 8 days; for each, read from `offset` to EOF; parse only complete lines (stop at last `\n`); add `message.usage` into `hours`; advance `offset`.
 - If a file is smaller than its stored offset, drop its entry and recount from 0 (truncated or rewritten). If a file disappears, its hour sums stay until older than 8 days, then the entry is pruned. This survives the 30-day log cleanup for the window we report.
 - Window totals are the sum over files of `hours` inside the window. Decided: hourly buckets (not daily) so `last_24h` is exact; `by_day` is derived by summing hours per UTC date.
+- Decided: window definition. With hourly buckets, `last_24h` is the 24 whole UTC hour buckets ending with the current partial hour, and `last_7d` is the 168 buckets ending the same way. Consequently `last_7d` is not equal to the sum of `by_day` (`by_day` is calendar UTC dates), and an event exactly 24 h old is outside `last_24h`.
 - Duplicate usage lines: assistant messages can be logged more than once (streaming chunks). Decided: consecutive lines with the same `message.id` collapse to the last one; verified or replaced by spike 2.3.
 - The collector reads only `type`, `message.id`, `message.usage`, `timestamp` from each line, and `agentType` from meta files. It never logs or stores any other field.
 - Fail soft: unreadable file, bad JSON line or missing usage skips that line/file and adds a count-only warning. Unknown layout (no projects dir, zero matching files while sessions are busy) yields `tokens: null` plus a warning. `claude --version` not in the tested list adds a version warning; collection still runs. Exit code is 0 unless the snapshot could not be written.
@@ -121,7 +125,9 @@ inbox/<host>.json              latest snapshot per host (atomic rename)
 inbox/.<host>.json.tmp         in-flight upload; ignored by readers
 ```
 
-- Upload script run by `push` on the hub (POSIX sh, one single-quoted `sh -c` argument so the user's login shell does not matter): `umask 077; d="${XDG_STATE_HOME:-$HOME/.local/state}/grid-fleet/inbox"; mkdir -p "$d" && cat > "$d/.H.json.tmp" && mv "$d/.H.json.tmp" "$d/H.json"` with `H` the sanitised host name.
+- Upload script run by `push` on the hub (POSIX sh, one single-quoted `sh -c` argument so the user's login shell does not matter): `umask 077; d="${XDG_STATE_HOME:-$HOME/.local/state}/grid-fleet/inbox"; mkdir -p "$d" && cat > "$d/.H.json.tmp" && [ "$(tail -c 1 "$d/.H.json.tmp" | wc -l)" -eq 1 ] && mv "$d/.H.json.tmp" "$d/H.json"` with `H` the sanitised host name.
+- Decided: the receiver renames only if the temp file ends in a newline. A dropped client connection can deliver a clean EOF after partial bytes, so `cat` succeeding does not prove the upload was complete. Snapshots are JSON + `"\n"`, so a missing trailing newline means truncation. A failed check leaves the previous `<host>.json` untouched and the partial data in the dot-prefixed tmp file.
+- Known residual limit: the newline check catches truncation, not every short stream that happens to end in a newline. The hub view skips invalid JSON as a backstop.
 - ssh options: `-o BatchMode=yes -o ConnectTimeout=10`. No prompts ever; failure exits non-zero, keeps the local snapshot, retries on the next timer tick.
 - Readers ignore dotfiles, files over 256 KiB, invalid JSON and unknown `schema`; the footer says how many were skipped.
 
@@ -194,11 +200,12 @@ Path: `$GRID_FLEET_CONFIG`, else `$XDG_CONFIG_HOME/grid-fleet/config.json`, else
 └───────────────────────────────────────────────────────────────────────┘
 ```
 
+- Note: the `n of m hosts fresh` count is shown in the footer; the spec governs, not this sketch.
 - Decided: minimum size 60x16; smaller shows a one-line "terminal too small" message. Redraw on SIGWINCH (`KEY_RESIZE`).
 - Colours (16-colour palette, `NO_COLOR` honoured): limit bars green < 60 %, yellow 60-84 %, red >= 85 %; busy cyan; waiting yellow; stale/unknown grey (dim); in+cache lines dim.
 - Glyphs: box drawing, `█▏▎▍▌▋▊▉` bars, `▁▂▃▄▅▆▇█` sparkline; ASCII fallback (`+-|#.`) when the locale is not UTF-8 or `view.ascii` is true. Braille is not used (font-dependent).
 - Keys: `q` / Ctrl-C quit (terminal restored), `r` re-read inbox now. Auto-refresh every `refresh_s` (default 5) by comparing inbox mtimes.
-- Token numbers use k / M / G with one decimal.
+- Token numbers use k / M / G with at most one decimal; a trailing `.0` is dropped.
 - Subagents panel: top 8 by invocations summed across fresh hosts; `main` included. Output tokens per type are a dim second column when width allows.
 - No per-session list, no cwd, no names.
 
