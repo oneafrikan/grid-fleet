@@ -25,6 +25,8 @@ class CliCase(unittest.TestCase):
             "GRID_FLEET_CONFIG": self.cfg_path,
             "GRID_FLEET_STATE_DIR": os.path.join(self.tmp.name, "state"),
             "GRID_FLEET_CLAUDE_DIR": os.path.join(self.tmp.name, "claude"),
+            # Nonexistent binary so no test ever runs the real `claude` from PATH.
+            "GRID_FLEET_CLAUDE_BIN": os.path.join(self.tmp.name, "no-such-claude"),
         })
         patcher.start()
         self.addCleanup(patcher.stop)
@@ -47,7 +49,7 @@ class TestCli(CliCase):
 
     def test_each_subcommand_is_a_stub_exiting_2(self):
         # Implemented subcommands are removed from this list as their units land.
-        for name in ("collect", "push", "install"):
+        for name in ("push", "install"):
             rc, _, err = self.run_cli([name])
             self.assertEqual(rc, 2, name)
             self.assertIn("not implemented", err, name)
@@ -138,7 +140,7 @@ class TestEntryScript(CliCase):
         r = subprocess.run([sys.executable, BIN, "--version"], capture_output=True, text=True)
         self.assertEqual(r.returncode, 0)
         self.assertIn(__version__, r.stdout)
-        r = subprocess.run([sys.executable, BIN, "collect"], capture_output=True, text=True)
+        r = subprocess.run([sys.executable, BIN, "install"], capture_output=True, text=True)
         self.assertEqual(r.returncode, 2)
         self.assertIn("not implemented", r.stderr)
 
