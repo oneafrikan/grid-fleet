@@ -30,3 +30,14 @@
 
 - There is NO git remote yet.
 - When decided, create `oneafrikan/grid-fleet` (MIT). Private first is acceptable; flip to public only after the 9.3 grep passes (and groups 1-5 pass).
+
+## Future decisions: outcomes roster (v2 idea, undecided)
+
+An "outcomes roster": not a task list, a team-roster-style view of what is being built and where (outcome, repo@branch/worktree, machine, active sessions, state). Leaning: a v2 view over the same snapshots, with opt-in repo/branch fields (changes the privacy contract). Not in `fleet-tracer-bullet`.
+
+Questions to answer before specifying it:
+
+1. Is an "outcome" an OpenSpec change, a branch, or a free-text goal you type?
+2. Should it be auto-derived, hand-declared, or the hybrid?
+3. Should it be a tab in grid-fleet's TUI, or its own tool?
+4. Should it wait until grid-fleet's tracer bullet is done?
