@@ -46,7 +46,8 @@ class TestCli(CliCase):
         self.assertIn(__version__, out)
 
     def test_each_subcommand_is_a_stub_exiting_2(self):
-        for name in ("collect", "push", "view", "install"):
+        # Implemented subcommands are removed from this list as their units land.
+        for name in ("collect", "push", "install"):
             rc, _, err = self.run_cli([name])
             self.assertEqual(rc, 2, name)
             self.assertIn("not implemented", err, name)
