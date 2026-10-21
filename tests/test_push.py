@@ -73,11 +73,15 @@ class PushBase(unittest.TestCase):
     def snap_path(self):
         return snapshot.snapshot_path(self.config)
 
-    def store_snapshot(self, age=60, **overrides):
-        """Write a stored snapshot.json `age` seconds old; return its exact bytes."""
+    def store_snapshot(self, age=60, indent=None, **overrides):
+        """Write a stored snapshot.json `age` seconds old; return its exact bytes.
+
+        `indent` pretty-prints it (inner newlines), only to give truncation tests
+        somewhere to cut. Real snapshots are one line + a trailing newline.
+        """
         snap = make_snapshot("alpha", collected_at=NOW - age, interval_s=INTERVAL, **overrides)
         os.makedirs(self.state, exist_ok=True)
-        data = (json.dumps(snap) + "\n").encode("utf-8")
+        data = (json.dumps(snap, indent=indent) + "\n").encode("utf-8")
         with open(self.snap_path(), "wb") as fh:
             fh.write(data)
         return data
@@ -126,8 +130,11 @@ class TestPushOverSsh(PushBase):
         self.assertTrue(argv[5].startswith("sh -c '"))
         self.assertTrue(argv[5].endswith("'"))
         self.assertNotIn("\n", argv[5])
-        # The upload script from design.md, with H = the host name.
-        self.assertIn('mkdir -p "$d" && cat > "$d/.alpha.json.tmp" && mv "$d/.alpha.json.tmp" "$d/alpha.json"', argv[5])
+        # The upload script from design.md, with H = the host name: tmp file, completeness
+        # check (last byte must be a newline), then the atomic rename.
+        self.assertIn('mkdir -p "$d" && cat > "$d/.alpha.json.tmp" && '
+                      '[ "$(tail -c 1 "$d/.alpha.json.tmp" | wc -l)" -eq 1 ] && '
+                      'mv "$d/.alpha.json.tmp" "$d/alpha.json"', argv[5])
         self.assertIn("umask 077", argv[5])
 
     def test_hub_unreachable(self):
@@ -142,15 +149,41 @@ class TestPushOverSsh(PushBase):
         self.assertEqual(self.ssh.inbox_files(), [])
         self.assertEqual(out, "")
 
-    def test_failure_log_line_is_sanitised_and_short(self):
+    def test_failure_log_line_is_reason_class_and_exit_code_only(self):
         self.store_snapshot()
-        self.ssh.set_mode("fail")
+        self.ssh.set_mode("fail", code=255)
+        _, out, err = self.run_push()
+        # Exactly this shape: nothing from ssh's own output follows the exit code.
+        self.assertEqual(err, "grid-fleet push: push failed (ssh exit 255); local snapshot kept\n")
+        self.assertEqual(out, "")
+
+    def test_ssh_stderr_never_reaches_push_output(self):
+        # The fake's stderr line names "hub-alias" (a synthetic host). It must not be echoed on
+        # stdout or stderr: ssh output can carry host names, addresses and key paths, and this
+        # line lands in timer logs.
+        self.store_snapshot()
+        self.ssh.set_mode("fail", code=255)
+        rc, out, err = self.run_push()
+        self.assertNotEqual(rc, 0)
+        for text in (out, err):
+            self.assertNotIn("hub-alias", text)
+            self.assertNotIn("synthetic failure", text)
+            self.assertNotIn("could not reach", text)
+        # Same through the real CLI in a child process (what a timer would log).
+        env = dict(os.environ)
+        env.update(self.config_env({"hub": ALIAS}))
+        r = subprocess.run([sys.executable, BIN, "push"], capture_output=True, text=True, env=env)
+        self.assertNotEqual(r.returncode, 0)
+        combined = r.stdout + r.stderr
+        self.assertNotIn("hub-alias", combined)
+        self.assertNotIn("synthetic failure", combined)
+
+    def test_other_exit_codes_keep_a_short_one_line_log(self):
+        self.store_snapshot()
+        self.ssh.set_mode("fail", code=7)
         _, _, err = self.run_push()
-        # Control characters in ssh's stderr cannot forge extra log lines.
-        line = push._short_reason(b"boom\x1b[31m\nsecond line\n" + b"x" * 500)
-        self.assertNotIn("\x1b", line)
-        self.assertNotIn("second", line)
-        self.assertLessEqual(len(line), push._REASON_MAX)
+        self.assertIn("ssh exit 7", err)
+        self.assertEqual(len(err.strip().splitlines()), 1)
         self.assertLess(len(err), 200)
 
     def test_ssh_timeout_is_a_failure_not_a_hang(self):
@@ -237,35 +270,96 @@ class TestAtomicDelivery(PushBase):
         self.assertEqual(partial, data[:10])
         self.assertEqual(len(self.ssh.calls()), 1)
 
-    # FINDING (reported to the tech lead; a design change, not fixed here):
-    # when the CLIENT connection drops mid-stream, sshd closes the remote command's stdin, so
-    # `cat` sees a clean EOF after the partial bytes and exits 0, and the design's script runs
-    # `mv` anyway, renaming the TRUNCATED tmp file over the good <host>.json. The scenario
-    # requires the previous file to stay unchanged; the design's script does not deliver that.
-    # Marked expectedFailure so the suite stays green while the finding is open. When the
-    # design gains a completeness check before `mv`, this starts "unexpectedly succeeding"
-    # (unittest reports that as a failure): remove the decorator then.
-    @unittest.expectedFailure
+    # --- client drops mid-stream ------------------------------------------------------
+    # When the CLIENT connection drops, sshd closes the remote command's stdin, so `cat` sees a
+    # clean EOF after the partial bytes and exits 0. The upload script therefore renames only if
+    # the tmp file ends in a newline (snapshots are JSON + "\n"). "die" mode in the fake ssh
+    # models exactly this: the remote command gets the first `after` bytes, then EOF.
+
+    def test_snapshot_bytes_pushed_end_in_newline(self):
+        # The completeness check relies on this. Collect for real (no stored snapshot) and
+        # assert on what is on disk, what the hub received and what push hands to ssh.
+        self.tree.add_session("proj-a", "sess-1", [usage_event(NOW - 60, output=5)])
+        self.assertTrue(push.fresh_snapshot_bytes(self.config).endswith(b"\n"))
+        self.assertTrue(self.local_snapshot().endswith(b"\n"))
+        self.assertEqual(self.run_push()[0], 0)
+        self.assertTrue(self.ssh.read_inbox("alpha").endswith(b"\n"))
+
+    def test_stored_snapshot_without_trailing_newline_is_recollected(self):
+        # A fresh-looking stored file lacking the final newline would be refused by the hub on
+        # every tick; push re-collects instead of sending it.
+        data = self.store_snapshot()
+        with open(self.snap_path(), "wb") as fh:
+            fh.write(data.rstrip(b"\n"))
+        sent = push.fresh_snapshot_bytes(self.config)
+        self.assertTrue(sent.endswith(b"\n"))
+        self.assertEqual(sent, self.local_snapshot())
+
+    def test_complete_stream_still_lands(self):
+        # Client dies only AFTER the whole stream was written: the hub got every byte, so the
+        # file is accepted and complete (push still reports failure: ssh exit 255).
+        data = self.store_snapshot()
+        self.seed_hub("alpha", self.OLD)
+        self.ssh.set_mode("die", after=len(data))
+        self.run_push()
+        self.assertEqual(self.ssh.read_inbox("alpha"), data)
+        self.assertEqual(self.ssh.inbox_files(), ["alpha.json"])
+
     def test_client_dropping_mid_stream_leaves_previous_file(self):
-        self.store_snapshot()
+        data = self.store_snapshot()
         self.seed_hub("alpha", self.OLD)
         self.ssh.set_mode("die", after=10)
         rc, _, _ = self.run_push()
         self.assertNotEqual(rc, 0)
         self.assertEqual(self.ssh.read_inbox("alpha"), self.OLD)
+        # The partial bytes sit only in the dot-prefixed tmp file readers ignore.
+        self.assertEqual(self.ssh.inbox_files(), [".alpha.json.tmp", "alpha.json"])
+        with open(os.path.join(self.ssh.inbox_dir(), ".alpha.json.tmp"), "rb") as fh:
+            self.assertEqual(fh.read(), data[:10])
 
-    def test_client_dropping_mid_stream_evidence(self):
-        # Not an assertion about desired behaviour: pins down what the design's script does
-        # today, so the finding above is reproducible from the suite output.
+    def test_zero_byte_stream_is_not_renamed(self):
+        self.store_snapshot()
+        self.seed_hub("alpha", self.OLD)
+        self.ssh.set_mode("die", after=0)
+        self.run_push()
+        self.assertEqual(self.ssh.read_inbox("alpha"), self.OLD)
+        self.assertEqual(self.ssh.inbox_files(), [".alpha.json.tmp", "alpha.json"])
+
+    def test_zero_byte_stream_with_no_previous_file_creates_no_final_file(self):
+        self.store_snapshot()
+        self.ssh.set_mode("die", after=0)
+        self.run_push()
+        self.assertIsNone(self.ssh.read_inbox("alpha"))
+
+    def test_stream_truncated_exactly_before_the_final_newline_is_not_renamed(self):
+        # Every byte except the closing "\n": a complete-looking JSON document, still refused.
         data = self.store_snapshot()
         self.seed_hub("alpha", self.OLD)
-        self.ssh.set_mode("die", after=10)
+        self.ssh.set_mode("die", after=len(data) - 1)
         self.run_push()
-        got = self.ssh.read_inbox("alpha")
-        self.assertEqual(got, data[:10])  # truncated bytes replaced the good file
-        self.assertNotEqual(got, self.OLD)
-        with self.assertRaises(ValueError):
-            json.loads(got.decode("utf-8"))
+        self.assertEqual(self.ssh.read_inbox("alpha"), self.OLD)
+
+    def test_stream_truncated_before_an_inner_newline_is_not_renamed(self):
+        data = self.store_snapshot(indent=1)
+        cut = data.index(b"\n")  # cut just BEFORE the first newline: last byte is not "\n"
+        self.seed_hub("alpha", self.OLD)
+        self.ssh.set_mode("die", after=cut)
+        self.run_push()
+        self.assertEqual(self.ssh.read_inbox("alpha"), self.OLD)
+
+    def test_stream_truncated_after_an_inner_newline_is_accepted_known_limit(self):
+        # KNOWN RESIDUAL LIMIT, documented on purpose. The check is "the last byte is a
+        # newline", so a stream cut exactly AFTER an inner newline looks complete to the hub.
+        # Real snapshots are one line plus the closing "\n", so for them only the full stream
+        # ends in a newline; the pretty-printed fixture here has inner newlines purely to show
+        # the gap. The check catches truncation, not every short stream.
+        data = self.store_snapshot(indent=1)
+        cut = data.index(b"\n") + 1
+        self.assertLess(cut, len(data))
+        self.seed_hub("alpha", self.OLD)
+        self.ssh.set_mode("die", after=cut)
+        self.run_push()
+        self.assertEqual(self.ssh.read_inbox("alpha"), data[:cut])  # truncated file accepted
 
     def test_partial_data_only_in_dot_prefixed_tmp_name(self):
         # Whatever happens, the in-flight name is a dot-file readers ignore.
@@ -410,10 +504,11 @@ class TestHostNameSafety(PushBase):
     def test_remote_command_contains_only_safe_host_characters(self):
         for raw in (self.HOSTILE, "a'b", 'a"b', "$(id)", "a b", "`id`", "a\nb", "", "...", "ok-host_1.example"):
             cmd = push.remote_command(raw)
-            # Exactly the three host slots, each filled with the same safe token.
+            # Exactly the four host slots (cat target, tail check, mv source, mv target),
+            # each filled with the same safe token.
             host = cfg.sanitize_host_name(raw)
             self.assertRegex(host, r"^[A-Za-z0-9_-][A-Za-z0-9._-]*$")
-            self.assertEqual(cmd.count(host + ".json"), 3, (raw, cmd))
+            self.assertEqual(cmd.count(host + ".json"), 4, (raw, cmd))
             self.assertEqual(cmd.count("'"), 2)  # only the wrapping quotes
 
 
