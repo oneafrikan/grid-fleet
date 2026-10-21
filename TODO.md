@@ -39,8 +39,8 @@
 
 ## Remote
 
-- There is NO git remote yet.
-- When decided, create `oneafrikan/grid-fleet` (MIT). Private first is acceptable; flip to public only after the 9.3 grep passes (and groups 1-5 pass).
+- Remote created (private) and `main` pushed.
+- Flip to public only after the 9.3 grep passes and groups 1-5 pass.
 
 ## Future decisions: outcomes roster (v2 idea, undecided)
 

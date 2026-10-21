@@ -67,5 +67,6 @@ Intended specialist agents (the-grid names):
 
 ## Git
 
-- Work is committed locally on `build/tracer-bullet`; there is NO git remote yet. Do not add one or push; the human creates it (see `TODO.md`).
+- A private remote `origin` exists (`oneafrikan/grid-fleet`, pushed over the `github-personal` ssh alias). Commit and push `main` after each logical unit.
+- Do not change the remote, flip it public, or create other remotes. The public flip happens only after the 9.3 public-readiness grep passes (see `TODO.md`).
 - Commit style: `type(scope): subject` (feat, fix, docs, spec, chore). Commit after each logical unit.
