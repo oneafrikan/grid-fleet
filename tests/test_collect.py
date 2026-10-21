@@ -298,6 +298,23 @@ class TestVersion(CollectBase):
 
 
 class TestTokenTotals(CollectBase):
+    def setUp(self):
+        super().setUp()
+        # Pin the process zone far from UTC so these tests prove the bucketing is UTC
+        # on any host; with a UTC host zone a local-time bug would go unnoticed.
+        old = os.environ.get("TZ")
+        self.addCleanup(self._restore_tz, old)
+        os.environ["TZ"] = "America/Los_Angeles"
+        time.tzset()
+
+    @staticmethod
+    def _restore_tz(old):
+        if old is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = old
+        time.tzset()
+
     def test_window_boundaries(self):
         # Scenario: Window boundaries - a 25 h old event is in last_7d, not last_24h
         self.session("proj-a", "sess-1", [
@@ -311,6 +328,18 @@ class TestTokenTotals(CollectBase):
         t = self.collect()["tokens"]
         self.assertEqual(t["last_24h"]["output"], 1 + 10)
         self.assertEqual(t["last_7d"]["output"], 1 + 10 + 20000 + 100 + 1000)
+
+    def test_last_7d_edge_is_exact_to_the_hour_bucket(self):
+        # NOW is 14:03Z, so last_7d = 168 whole-hour buckets starting 167 h before the
+        # 14:00 bucket. The oldest bucket's first second is in; the second before is out.
+        oldest_start_age = 167 * H + (NOW % H)  # age of the first second of the oldest bucket
+        self.session("proj-a", "sess-1", [
+            ev(oldest_start_age, output=1),      # first second of the oldest bucket: included
+            ev(oldest_start_age + 1, output=10),  # last second of the bucket before: excluded
+        ])
+        t = self.collect()["tokens"]
+        self.assertEqual(t["last_7d"]["output"], 1)
+        self.assertEqual(t["last_24h"]["output"], 0)
 
     def test_by_day_is_seven_utc_dates_ending_today(self):
         self.session("proj-a", "sess-1", [ev(1 * H, output=1), ev(25 * H, output=100), ev(6 * D, output=1000)])

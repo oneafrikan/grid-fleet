@@ -3,6 +3,7 @@
 import json
 import os
 import tempfile
+import threading
 import unittest
 
 from grid_fleet import hub
@@ -98,6 +99,27 @@ class TestSkipRules(HubCase):
         os.makedirs(os.path.join(self.state, "inbox", "weird.json"))
         s = self.read()
         self.assertEqual((s.hosts, s.skipped), ((), 1))
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "no os.mkfifo on this platform")
+    def test_fifo_named_like_a_snapshot_skipped_without_hanging(self):
+        # Opening a FIFO with no writer blocks forever; the S_ISREG guard must skip it
+        # before open(). Scan in a daemon thread so a regression FAILS instead of hanging.
+        inbox = os.path.join(self.state, "inbox")
+        os.makedirs(inbox)
+        fifo = os.path.join(inbox, "x.json")
+        os.mkfifo(fifo)
+        result = []
+        t = threading.Thread(target=lambda: result.append(self.read()), daemon=True)
+        t.start()
+        t.join(5)
+        if t.is_alive():
+            # Unblock the stuck reader (opening for write releases it) so it can exit.
+            try:
+                os.close(os.open(fifo, os.O_WRONLY | os.O_NONBLOCK))
+            except OSError:
+                pass
+            self.fail("scan hung on a FIFO: S_ISREG guard missing")
+        self.assertEqual((result[0].hosts, result[0].skipped), ((), 1))
 
     def test_hostile_file_name_sanitised_for_display(self):
         write_inbox_file(self.state, "al\x1b[31mpha.json", make_snapshot("alpha"), NOW)
