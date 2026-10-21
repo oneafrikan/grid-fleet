@@ -16,7 +16,7 @@ Show the whole fleet at a glance in a btop-style terminal dashboard on the hub, 
 - **THEN** the display reflects it within `refresh_s` seconds plus one redraw
 
 ### Requirement: Per-host sessions and tokens
-The view SHALL show for each host the busy and waiting session counts and output tokens for 24 hours and 7 days as the headline, with input plus cache tokens on a separate muted line, and a total row.
+The view SHALL show for each host the busy and waiting session counts and output tokens for 24 hours and 7 days as the headline, with input plus cache tokens on a separate muted line, and a total row. Token figures use k / M / G with at most one decimal, and a trailing `.0` is dropped (so 400000 renders `400k` and 3100000 renders `3.1M`).
 
 #### Scenario: Fresh host
 - **WHEN** a host snapshot is fresh with 2 busy and 1 waiting sessions
@@ -29,6 +29,10 @@ The view SHALL show for each host the busy and waiting session counts and output
 #### Scenario: Null section
 - **WHEN** a host's `sessions` is `null`
 - **THEN** its session cells show `unknown`, not 0
+
+#### Scenario: Partial totals
+- **WHEN** a fresh host's `sessions` or `tokens` is `null`
+- **THEN** the total sums the known values and appends `+` (for example `2+`), and is `unknown` if no fresh host reported that figure
 
 ### Requirement: Staleness
 A host is stale when the age of its inbox file, measured on the hub clock, exceeds twice the snapshot `interval_s`. Stale hosts SHALL render as grey `unknown` with their age, and SHALL be excluded from totals, with the footer stating how many hosts are fresh.

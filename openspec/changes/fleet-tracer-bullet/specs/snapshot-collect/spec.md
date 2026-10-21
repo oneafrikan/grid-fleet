@@ -39,7 +39,7 @@ The collector SHALL count sessions from `claude agents --json`, including only r
 - **THEN** `sessions` is `null` and a warning is recorded
 
 ### Requirement: Token totals
-The collector SHALL sum `output`, `input`, `cache_creation` and `cache_read` tokens from `message.usage` in main and subagent transcripts, bucketed by event timestamp, and report rolling `last_24h`, rolling `last_7d` and seven `by_day` entries by UTC date.
+The collector SHALL sum `output`, `input`, `cache_creation` and `cache_read` tokens from `message.usage` in main and subagent transcripts, bucketed by event timestamp, and report rolling `last_24h`, rolling `last_7d` and seven `by_day` entries by UTC date. With hourly buckets, `last_24h` is the 24 whole UTC hour buckets ending with the current partial hour and `last_7d` is the 168 buckets ending the same way, so `last_7d` is not equal to the sum of `by_day` and an event exactly 24 hours old is outside `last_24h`.
 
 #### Scenario: Window boundaries
 - **WHEN** a usage event is 25 hours old
