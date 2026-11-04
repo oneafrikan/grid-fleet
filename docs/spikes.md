@@ -169,6 +169,47 @@ Verdict:
 - PASS. p95 added latency under 50 ms in both env cases and output identical in both. The 50 ms
   bound in the spec is CONFIRMED. Shell-wrapper fallback not triggered.
 
+### 7.1b Tap overhead of the real tap, before and after the fast path (QA finding F1)
+
+Same method as 7.1 (50 timed invocations per cell, 5 warm-up, direct and tapped interleaved,
+synthetic gated original, gating env var unset or set), but timing the real `bin/grid-fleet tap`.
+Before = commit `a3564c0` (tap reached through `cli` and `config`). After = commit `48b2b9c` (tap
+dispatched before `cli`, no argparse/dataclasses/typing/tempfile/subprocess import).
+"Load" = one busy-loop process per core running during the cell. Added p50 = tapped p50 minus
+direct p50; added p95 = tapped p95 minus direct p95. All values in ms. Other work was running on
+the machine, so absolute values vary a few ms run to run.
+
+`/usr/bin/python3` 3.9.6 (target), two interleaved full runs:
+
+| Load | Gating vars | Run | Before added p50 / p95 | After added p50 / p95 |
+|---|---|---|---|---|
+| idle | unset | 1 | 40.7 / 42.2 | 23.7 / 27.3 |
+| idle | unset | 2 | 40.7 / 42.8 | 22.1 / 30.7 |
+| idle | set | 1 | 42.5 / 54.7 | 22.6 / 23.8 |
+| idle | set | 2 | 40.2 / 42.7 | 21.9 / 22.9 |
+| load | unset | 1 | 58.5 / 65.7 | 40.5 / 40.8 |
+| load | unset | 2 | 60.4 / 63.3 | 39.4 / 43.0 |
+| load | set | 1 | 60.8 / 64.4 | 40.4 / 42.0 |
+| load | set | 2 | 59.7 / 66.5 | 39.1 / 43.3 |
+
+Homebrew `python3` 3.14.6, one run:
+
+| Load | Gating vars | Before added p50 / p95 | After added p50 / p95 |
+|---|---|---|---|
+| idle | unset | 43.3 / 51.2 | 20.6 / 24.5 |
+| idle | set | 42.0 / 51.8 | 19.1 / 20.4 |
+| load | unset | 60.1 / 68.7 | 31.7 / 33.0 |
+| load | set | 56.9 / 64.1 | 32.7 / 34.3 |
+
+Interpreter start-up alone, `python -c <import>`, `/usr/bin/python3`, 60 rounds, median in ms:
+
+| Imports | p50 | p95 |
+|---|---|---|
+| none | 17.2 | 20.5 |
+| `json` | 21.9 | 25.5 |
+| `subprocess` | 23.2 | 30.0 |
+| `json`, `subprocess` | 25.4 | 31.2 |
+
 ### 7.2 Missing limits, synthetic payloads (prototype tap, `/usr/bin/python3` 3.9.6)
 
 | Case | Prior file | Resulting file state | Maps to spec |
