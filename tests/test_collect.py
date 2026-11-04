@@ -59,6 +59,8 @@ class CountingOpener(object):
     def __init__(self):
         self.bytes_read = {}  # path -> bytes returned by read()
         self.opened = []  # every path opened, in order
+        self.max_read = {}  # path -> largest single read() result (proves reads are bounded)
+        self.read_calls = {}  # path -> number of read() calls
 
     def __call__(self, path, mode="r", *a, **kw):
         self.opened.append(path)
@@ -72,6 +74,8 @@ class _CountingFile(object):
     def read(self, *a):
         data = self._fh.read(*a)
         self._owner.bytes_read[self._path] = self._owner.bytes_read.get(self._path, 0) + len(data)
+        self._owner.max_read[self._path] = max(self._owner.max_read.get(self._path, 0), len(data))
+        self._owner.read_calls[self._path] = self._owner.read_calls.get(self._path, 0) + 1
         return data
 
     def seek(self, *a):
@@ -723,6 +727,112 @@ class TestByDay(CollectBase):
         warm = self.collect()["tokens"]["by_day"]
         fresh = self.make_config(state=os.path.join(self.work, "fresh-state"))
         self.assertEqual(warm, self.collect(fresh)["tokens"]["by_day"])
+
+
+class TestChunkedRead(CollectBase):
+    """S8: a transcript is read in bounded chunks (sources_claude.READ_CHUNK_BYTES), never
+    whole, yet the result must equal the unchunked one and keep the offset-cache semantics."""
+
+    CHUNK = 128  # smaller than one event line (~300 bytes) so every line crosses a boundary
+
+    def chunked(self, chunk=None):
+        return mock.patch.object(sources_claude, "READ_CHUNK_BYTES", chunk or self.CHUNK)
+
+    def fresh_config(self):
+        return self.make_config(state=os.path.join(self.work, "fresh-%d" % len(os.listdir(self.work))))
+
+    def test_default_chunk_is_8_mib(self):
+        self.assertEqual(sources_claude.READ_CHUNK_BYTES, 8 * 1024 * 1024)
+
+    def test_chunked_totals_equal_unchunked_result(self):
+        events = [ev(600 - i, output=i + 1, input=2, cache_read=3) for i in range(60)]
+        # A streamed message split over lines (same id twice) that straddles chunk boundaries,
+        # and a corrupt line, which must be counted as bad exactly once.
+        events += [ev(30, output=5, message_id="m-dup"), ev(29, output=9, message_id="m-dup")]
+        path = self.session("proj-a", "sess-1", events)
+        self.tree.append_raw(path, "{not json\n")
+        self.subagent("proj-a", "sess-1", "a1", "core-researcher", [ev(60, output=7) for _ in range(30)])
+        want = self.collect(self.fresh_config())  # default (single 8 MiB) chunk: whole file at once
+        with self.chunked():
+            got = self.collect(self.fresh_config())
+            self.assertEqual(got["tokens"], want["tokens"])
+            self.assertEqual(got["agents"], want["agents"])
+            self.assertEqual(got["warnings"], want["warnings"])
+            self.assertIn("skipped 1 unparseable transcript lines", got["warnings"])
+        # Several odd chunk sizes, including 1 byte and one that lands exactly on a newline.
+        line_len = len(json.dumps(events[0])) + 1
+        for chunk in (1, 7, line_len, line_len + 1, 1000):
+            with self.chunked(chunk):
+                self.assertEqual(self.collect(self.fresh_config())["tokens"], want["tokens"], chunk)
+
+    def test_line_spanning_a_chunk_boundary_is_counted_once(self):
+        path = self.session("proj-a", "sess-1", [ev(60, output=40)])
+        size = os.path.getsize(path)
+        with self.chunked(size // 2):  # the boundary falls in the middle of the only line
+            snap = self.collect()
+        self.assertEqual(snap["tokens"]["last_24h"]["output"], 40)
+        ent = list(self.offsets()["files"].values())[0]
+        self.assertEqual((ent["offset"], ent["size"]), (size, size))
+
+    def test_partial_final_line_is_not_consumed_across_chunks(self):
+        path = self.session("proj-a", "sess-1", [ev(60, output=10), ev(50, output=20)])
+        complete = os.path.getsize(path)
+        line = json.dumps(ev(30, output=40, message_id="m-late"))
+        self.tree.append_raw(path, line[:100])  # unterminated tail longer than one chunk
+        with self.chunked(40):
+            self.assertEqual(self.collect()["tokens"]["last_24h"]["output"], 30)
+            ent = list(self.offsets()["files"].values())[0]
+            self.assertEqual(ent["offset"], complete)  # offset stops at the last newline
+            self.assertEqual(ent["size"], complete + 100)
+            self.assertEqual(self.collect()["warnings"], [])  # an unfinished line is not an error
+            self.tree.append_raw(path, line[100:] + "\n")
+            self.assertEqual(self.collect()["tokens"]["last_24h"]["output"], 70)
+            self.assertEqual(self.collect()["tokens"]["last_24h"]["output"], 70)  # no double count
+
+    def test_reads_are_bounded_and_warm_run_reads_only_appended_bytes(self):
+        path = self.session("proj-a", "sess-1", [ev(600, output=1) for _ in range(40)])
+        with self.chunked(256):
+            cold = CountingOpener()
+            self.collect(opener=cold)
+            self.assertLessEqual(cold.max_read[path], 256)  # never the whole file at once
+            self.assertGreater(cold.read_calls[path], 2)
+            appended = [ev(60, output=20) for _ in range(3)]
+            self.tree.append_events(path, appended)
+            new_bytes = sum(len(json.dumps(e)) + 1 for e in appended)
+            warm = CountingOpener()
+            self.collect(opener=warm)
+            self.assertEqual(warm.bytes_read[path], new_bytes)  # nothing before the offset
+            self.assertLessEqual(warm.max_read[path], 256)
+
+    def test_read_error_midway_keeps_progress_and_never_double_counts(self):
+        path = self.session("proj-a", "sess-1", [ev(600 - i, output=i + 1) for i in range(30)])
+        want = self.collect(self.fresh_config())["tokens"]
+
+        class FailsOnSecondRead(CountingOpener):
+            def __call__(self, p, mode="r", *a, **kw):
+                f = super().__call__(p, mode, *a, **kw)
+                if p == path:
+                    real = f.read
+                    state = {"n": 0}
+
+                    def read(*args):
+                        state["n"] += 1
+                        if state["n"] == 2:
+                            raise OSError("synthetic read error")
+                        return real(*args)
+                    f.read = read
+                return f
+
+        with self.chunked(1000):  # a few lines per chunk, so the first chunk consumes some
+            snap = self.collect(opener=FailsOnSecondRead())
+            self.assertIn("1 transcript files unreadable", snap["warnings"])
+            # What the first chunk contributed is kept (offset advanced with the counts)...
+            ent = list(self.offsets()["files"].values())[0]
+            self.assertGreater(ent["offset"], 0)
+            self.assertLess(ent["offset"], os.path.getsize(path))
+            # ...and the next healthy run finishes the file with the exact fresh-recount totals.
+            self.assertEqual(self.collect()["tokens"], want)
+            self.assertEqual(self.collect()["tokens"], want)
 
 
 class TestIncrementalScan(CollectBase):

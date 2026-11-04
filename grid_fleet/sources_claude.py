@@ -426,6 +426,36 @@ def _consume(data: bytes, ent: dict) -> int:
     return end + 1
 
 
+# A transcript is read in pieces of at most this many bytes, never whole: a multi-GB
+# transcript (or a hostile one) must not be loaded into memory in one read(). Module-level
+# so tests can shrink it. Each piece is cut at its last newline and the partial line is
+# carried into the next piece, so the result equals reading the file at once.
+READ_CHUNK_BYTES = 8 * 1024 * 1024
+
+
+def _consume_stream(fh, ent: dict) -> int:
+    """Read `fh` (already seeked to ent["offset"]) to EOF in READ_CHUNK_BYTES pieces and
+    fold every complete line into `ent`, advancing ent["offset"] chunk by chunk.
+
+    Returns the length of the unterminated tail left after the last newline (0 when the
+    file ends on a newline). The tail is NOT consumed: ent["offset"] stops at the last
+    newline, so the next run re-reads it once it is complete (spec: partial last line).
+    Offset and counts always advance together, so if read() raises part-way the entry
+    is still consistent: the next run resumes from ent["offset"] without double counting.
+    A single line longer than the chunk size is simply carried and grows `tail`; only the
+    bytes of that one line are held, not the file.
+    """
+    tail = b""
+    while True:
+        chunk = fh.read(READ_CHUNK_BYTES)
+        if not chunk:
+            return len(tail)
+        data = tail + chunk if tail else chunk
+        consumed = _consume(data, ent)
+        ent["offset"] += consumed
+        tail = data[consumed:]
+
+
 def scan_transcripts(
     projects_dir: str, state_dir: str, now: int, opener: Callable = open
 ) -> ScanResult:
@@ -485,17 +515,21 @@ def scan_transcripts(
             if st.st_size == ent["offset"]:
                 ent["size"] = st.st_size
                 continue  # nothing new: no read at all (the warm-run hot path)
+            start = ent["offset"]
             try:
                 with opener(path, "rb") as fh:
-                    fh.seek(ent["offset"])
-                    data = fh.read()
+                    fh.seek(start)
+                    tail_len = _consume_stream(fh, ent)
             except OSError:
                 unreadable += 1
+                if ent["offset"] != start:
+                    # Some chunks were folded in before the error: keep that progress (the
+                    # offset moved with the counts) and persist it.
+                    ent["size"] = ent["offset"]
+                    dirty = True
                 continue
-            consumed = _consume(data, ent)
-            ent["offset"] += consumed
-            new_size = ent["offset"] + (len(data) - consumed)  # include an unterminated tail
-            if consumed or new_size != ent["size"]:
+            new_size = ent["offset"] + tail_len  # include an unterminated tail
+            if ent["offset"] != start or new_size != ent["size"]:
                 dirty = True  # an unchanged partial tail alone does not rewrite the cache
             ent["size"] = new_size
 
