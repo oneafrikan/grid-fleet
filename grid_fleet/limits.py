@@ -1,11 +1,13 @@
 """statusLine tap (wrapper around the user's original statusLine) + limits.json read.
 
-Entry point used by cli.py: tap_main(config, args) -> int, where
-args.original_command is the list of argv words after `tap --` ([] if none).
+Entry points:
+  tap_fast(argv) -> int or None   called by bin/grid-fleet BEFORE cli/argparse is imported
+  tap_main(config, args) -> int   called by cli.py (same behaviour; args.original_command
+                                  is the list of argv words after `tap --`, [] if none)
 Reader used by `collect`: read_limits(config) -> dict or None.
 
-What the tap does, once per statusLine refresh (so it must stay fast; spike 7.1
-measured about 26 ms added at p95):
+What the tap does, once per statusLine refresh (so it must stay fast: the spec bound is
+< 50 ms added at p95; see docs/spikes.md for measured numbers):
 
   1. Read stdin ONCE into memory (the statusLine payload).
   2. Capture the account's rate-limit slice into <state_dir>/limits.json. Any
@@ -23,17 +25,22 @@ limits.json (schema 1), written 0600 via tmp + rename:
 Privacy: only the fields above are ever copied out of the payload. The payload
 also carries a working directory, session id, transcript path and model; none of
 those is read into the file, so none can reach a snapshot.
+
+Startup cost is the dominant cost of the tap (it is a fresh interpreter every refresh),
+so this module deliberately imports only json/math/os/sys, the builtin _signal and the
+light grid_fleet.paths. NOT subprocess (about 6 ms), signal, typing, tempfile (pulls in
+shutil, random, bz2, lzma), argparse, dataclasses or grid_fleet.config.
+tests/test_limits.py asserts that none of those get loaded.
 """
 
 import json
 import math
 import os
-import subprocess
 import sys
-import tempfile
-from typing import List, Optional
 
-from grid_fleet import config as cfg
+import _signal  # builtin: raw signal numbers without signal.py's enum import cost
+
+from grid_fleet import paths
 
 LIMITS_FILE = "limits.json"
 SCHEMA = 1
@@ -48,7 +55,7 @@ def limits_path(config) -> str:
     # A Config built from defaults (cli does this when the config file is
     # broken, so the statusLine survives) has no state_dir: resolve it from
     # the environment rather than writing into the current directory.
-    state = getattr(config, "state_dir", "") or cfg.state_dir()
+    state = getattr(config, "state_dir", "") or paths.state_dir()
     return os.path.join(state, LIMITS_FILE)
 
 
@@ -70,7 +77,7 @@ def _is_number(value: object) -> bool:
         return False
 
 
-def _clean_window(raw: object, name_in: str, name_out: str) -> Optional[dict]:
+def _clean_window(raw: object, name_in: str, name_out: str) -> "Optional[dict]":
     """Pick the two known fields out of one window; None if either is unusable.
 
     `name_in`/`name_out` differ only for used_pct (payload: used_percentage).
@@ -108,7 +115,7 @@ def _slice_from_payload(data: bytes) -> dict:
 # --- file read / merge / write -------------------------------------------------
 
 
-def _read_file(path: str) -> Optional[dict]:
+def _read_file(path: str) -> "Optional[dict]":
     """Parse limits.json into a clean dict, or None if absent/invalid.
 
     Re-validates and re-slices rather than trusting the file: a hand-edited or
@@ -136,12 +143,12 @@ def _read_file(path: str) -> Optional[dict]:
     return out if len(out) > 1 else None
 
 
-def read_limits(config) -> Optional[dict]:
+def read_limits(config) -> "Optional[dict]":
     """The `limits` snapshot section, or None when never captured / unreadable."""
     return _read_file(limits_path(config))
 
 
-def _merge(previous: Optional[dict], new: dict, now: int) -> dict:
+def _merge(previous: "Optional[dict]", new: dict, now: int) -> dict:
     """Build the next file content (merge rule from the limits-capture spec).
 
     A window absent from the new payload keeps its previous stored value only
@@ -162,15 +169,18 @@ def _merge(previous: Optional[dict], new: dict, now: int) -> dict:
 
 
 def _atomic_write(path: str, obj: dict) -> None:
-    """tmp + rename in the same directory; mkstemp makes the temp file 0600.
+    """tmp + rename in the same directory; the temp file is created 0600 and O_EXCL.
 
-    Deliberately not shared with sources_claude.atomic_write_json: that module is
-    large and the tap runs on every statusLine refresh, so importing it would
-    cost startup time on the hot path. Raises OSError.
+    Deliberately not shared with sources_claude.atomic_write_json (large module) nor
+    built on tempfile.mkstemp (pulls in shutil/random/bz2/lzma): the tap runs on every
+    statusLine refresh, so importing either would cost startup time on the hot path.
+    The name is pid + 48 random bits, so concurrent taps never share a temp file.
+    Raises OSError.
     """
     directory = os.path.dirname(path)
     os.makedirs(directory, mode=0o700, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=directory, prefix="." + os.path.basename(path) + ".", suffix=".tmp")
+    tmp = os.path.join(directory, ".%s.%d.%s.tmp" % (os.path.basename(path), os.getpid(), os.urandom(6).hex()))
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             json.dump(obj, fh, separators=(",", ":"))
@@ -199,7 +209,7 @@ def capture(config, data: bytes) -> bool:
     if not new:
         return False
     path = limits_path(config)
-    now = cfg.now()
+    now = paths.now()
     _atomic_write(path, _merge(_read_file(path), new, now))
     return True
 
@@ -207,43 +217,69 @@ def capture(config, data: bytes) -> bool:
 # --- the tap -------------------------------------------------------------------
 
 
-def _run_original(command: List[str], data: bytes) -> int:
-    """Run the original statusLine; pass its stdout through; return its exit code.
+def _run_original(command: "List[str]", data: bytes) -> int:
+    """Run the original statusLine with `data` on its stdin; return its exit code.
 
-    No shell, no env override (full environment inherited), no timeout: the tap
-    must be indistinguishable from the original. stderr is inherited, so it
-    passes through untouched too.
+    No shell, no env override (full environment inherited), no timeout. Its stdout and
+    stderr are INHERITED, not captured: its bytes reach our caller untouched and in order,
+    which is as close to "indistinguishable from the original" as it gets (and works the
+    same when our own stdout is closed).
+
+    Spawned with os.posix_spawnp instead of subprocess: importing subprocess costs about
+    6 ms of start-up on every statusLine refresh (see the module docstring). Behaviour
+    kept equal to subprocess.run(command, input=data):
+      - SIGPIPE/SIGXFSZ are reset to default in the child (Python ignores SIGPIPE, and an
+        ignored signal would be inherited across exec, changing how pipelines in the
+        original behave).
+      - the stdin pipe is created non-inheritable, so only fd 0 of the child refers to it.
     """
+    program = command[0]
+    read_end, write_end = os.pipe()
     try:
-        proc = subprocess.run(command, input=data, stdout=subprocess.PIPE)
-    except OSError as exc:
-        # Cannot even start it. Say so on stderr (strerror only: no paths) and
-        # mimic the shell's exit code. Nothing on stdout.
-        # stderr may itself be closed (sys.stderr is None): then there is nobody to tell.
+        actions = []
+        if read_end == 0:
+            # Our own stdin was closed so the pipe landed on fd 0: dup2(0, 0) would leave
+            # it close-on-exec, so just make it inheritable.
+            os.set_inheritable(0, True)
+        else:
+            actions.append((os.POSIX_SPAWN_DUP2, read_end, 0))
         try:
-            sys.stderr.write("grid-fleet tap: cannot run original statusLine (%s)\n" % (exc.strerror or "error"))
-        except (AttributeError, OSError, ValueError):
+            pid = os.posix_spawnp(program, command, os.environ, file_actions=actions,
+                                  setsigdef=(_signal.SIGPIPE, _signal.SIGXFSZ))
+        except OSError as exc:
+            # Cannot even start it. Say so on stderr (strerror only: no paths) and mimic
+            # the shell's exit code. Nothing on stdout. stderr may itself be closed
+            # (sys.stderr is None): then there is nobody to tell.
+            try:
+                sys.stderr.write("grid-fleet tap: cannot run original statusLine (%s)\n" % (exc.strerror or "error"))
+            except (AttributeError, OSError, ValueError):
+                pass
+            return EXIT_ORIGINAL_UNAVAILABLE
+        os.close(read_end)
+        read_end = -1
+        try:
+            # Feed the identical bytes. The child may exit without reading them all
+            # (BrokenPipeError): that is its right, same as with subprocess.
+            view = memoryview(data)
+            while view:
+                view = view[os.write(write_end, view):]
+        except OSError:
             pass
-        return EXIT_ORIGINAL_UNAVAILABLE
-    try:
-        # A closed stdout leaves sys.stdout as None (AttributeError below); a vanished
-        # reader gives OSError; a detached stream gives ValueError. All three mean "no
-        # one to print to": the exit code is still what matters.
-        out = getattr(sys.stdout, "buffer", None)
-        if out is not None:
-            out.write(proc.stdout)
-            out.flush()
-        else:  # pragma: no cover - stdout without a binary layer
-            sys.stdout.write(proc.stdout.decode("utf-8", "replace"))
-            sys.stdout.flush()
-    except (AttributeError, OSError, ValueError):
-        pass
-    # A negative returncode means "killed by signal N": report it the way a shell would.
-    return proc.returncode if proc.returncode >= 0 else 128 - proc.returncode
+        os.close(write_end)
+        write_end = -1
+        _pid, status = os.waitpid(pid, 0)
+    finally:
+        for fd in (read_end, write_end):
+            if fd >= 0:
+                os.close(fd)
+    # A negative code means "killed by signal N": report it the way a shell would.
+    code = os.waitstatus_to_exitcode(status)
+    return code if code >= 0 else 128 - code
 
 
-def tap_main(config, args) -> int:
-    """`grid-fleet tap -- <original command...>`. Never fails because of the capture."""
+def _tap(config, command: "List[str]") -> int:
+    """The tap proper. `config` may be None (fast path): the state dir then comes from
+    the environment, exactly as for a Config built from defaults."""
     try:
         data = sys.stdin.buffer.read()
     except (OSError, ValueError, AttributeError):
@@ -258,7 +294,27 @@ def tap_main(config, args) -> int:
         # purpose: the statusLine output and exit code must be unaffected.
         pass
 
-    command = list(getattr(args, "original_command", None) or [])
     if not command:
         return 0  # no original configured: print nothing
     return _run_original(command, data)
+
+
+def tap_main(config, args) -> int:
+    """`grid-fleet tap -- <original command...>`, via cli.py. Never fails because of the capture."""
+    return _tap(config, list(getattr(args, "original_command", None) or []))
+
+
+def tap_fast(argv: "List[str]") -> "Optional[int]":
+    """Fast path for bin/grid-fleet: run the tap without importing cli/argparse/config.
+
+    Handles exactly the forms `tap` and `tap -- <original command...>` and returns the
+    exit code; for anything else (flags before `--`, `-h`, stray words) returns None so the
+    caller falls through to cli.main, which reports usage errors as before.
+
+    Why config is not loaded: the tap only ever needed the state dir, which config derives
+    from the same environment (GRID_FLEET_STATE_DIR / XDG_STATE_HOME) via paths.state_dir;
+    a broken config file already fell back to defaults, i.e. the same value.
+    """
+    if argv[:1] != ["tap"] or (len(argv) > 1 and argv[1] != "--"):
+        return None
+    return _tap(None, list(argv[2:]))

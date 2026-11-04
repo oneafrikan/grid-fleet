@@ -19,6 +19,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 from helpers.claude_tree import SYNTH_CWD, SYNTH_SESSION_NAME
 
@@ -27,6 +28,7 @@ from grid_fleet import limits
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BIN = os.path.join(REPO, "bin", "grid-fleet")
 LIMITS_SRC = os.path.join(REPO, "grid_fleet", "limits.py")
+PATHS_SRC = os.path.join(REPO, "grid_fleet", "paths.py")
 
 NOW = 1792591380  # fixed clock via GRID_FLEET_NOW
 
@@ -400,6 +402,126 @@ class TestOrderingAndSignals(TapBase):
             self.assertEqual(r.stdout, b"")
 
 
+class TestFastPath(TapBase):
+    """F1: `tap` is dispatched before argparse/dataclasses/typing are imported, and behaves
+    identically to the cli route."""
+
+    # Modules the tap's start-up must not pull in (each costs milliseconds on every refresh).
+    HEAVY = ("argparse", "dataclasses", "typing", "tempfile", "subprocess", "signal", "socket",
+             "grid_fleet.cli", "grid_fleet.config")
+
+    def run_entry_in_process(self, py, argv, stdin_data=b""):
+        """Exec bin/grid-fleet's source in a fresh interpreter; report which HEAVY modules loaded."""
+        code = (
+            "import sys\n"
+            "sys.argv = %r\n"
+            "try:\n"
+            "    exec(compile(open(%r).read(), %r, 'exec'), {'__name__': '__main__', '__file__': %r})\n"
+            "except SystemExit as e:\n"
+            "    rc = e.code\n"
+            "else:\n"
+            "    rc = None\n"
+            "sys.stderr.write('RC=%%s LOADED=%%s' %% (rc, ','.join(m for m in %r if m in sys.modules)))\n"
+            % ([BIN] + argv, BIN, BIN, BIN, self.HEAVY))
+        r = subprocess.run([py, "-c", code], input=stdin_data, stdout=subprocess.PIPE,
+                           stderr=subprocess.PIPE, env=self.env(), cwd=self.work)
+        tail = r.stderr.decode().rsplit("RC=", 1)[-1]
+        rc, loaded = tail.split(" LOADED=")
+        return rc, [m for m in loaded.split(",") if m], r
+
+    def test_tap_does_not_import_the_heavy_modules(self):
+        pythons = [sys.executable]
+        if os.path.exists("/usr/bin/python3") and "/usr/bin/python3" not in pythons:
+            pythons.append("/usr/bin/python3")
+        for py in pythons:
+            for argv in (["tap", "--", "true"], ["tap"]):
+                rc, loaded, r = self.run_entry_in_process(py, argv, payload(five=(1.0, NOW + 10)))
+                self.assertEqual(loaded, [], "%s %s imported %s" % (py, argv, loaded))
+                self.assertEqual(rc, "0", r.stderr)
+        # ...and it really captured (the lean path is not a no-op).
+        self.assertIn("five_hour", self.read())
+
+    def test_other_commands_still_go_through_cli(self):
+        rc, loaded, _r = self.run_entry_in_process(sys.executable, ["--version"])
+        self.assertIn("grid_fleet.cli", loaded)
+
+    def test_unusual_tap_argv_falls_back_to_cli_usage_errors(self):
+        # Not the plain `tap [-- cmd...]` form -> argparse reports it exactly as before.
+        r = self.tap(b"", command=None, original=False, env=None)  # plain form still fine
+        self.assertEqual(r.returncode, 0)
+        bad = subprocess.run([sys.executable, BIN, "tap", "bogus"], input=b"", stdout=subprocess.PIPE,
+                             stderr=subprocess.PIPE, env=self.env(), cwd=self.work)
+        self.assertEqual(bad.returncode, 2)
+        self.assertIn(b"unrecognized arguments", bad.stderr)
+        helped = subprocess.run([sys.executable, BIN, "tap", "-h"], input=b"", stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, env=self.env(), cwd=self.work)
+        self.assertEqual(helped.returncode, 0)
+        self.assertIn(b"usage:", helped.stdout)
+
+    def test_tap_fast_declines_what_it_does_not_fully_understand(self):
+        for argv in (["collect"], ["tap", "x"], ["tap", "-h"], ["tap", "x", "--", "true"], []):
+            self.assertIsNone(limits.tap_fast(argv), argv)
+
+    def test_cli_route_behaves_like_the_fast_route(self):
+        # cli.main (used by `python -m`-style callers and tests) still reaches the same tap.
+        data = payload(five=(42.0, NOW + 100), seven=(18.0, NOW + 1000))
+        code = ("import sys; sys.path.insert(0, %r); from grid_fleet.cli import main; "
+                "sys.exit(main(['tap', '--', 'sh', '-c', 'cat >/dev/null; exit 5']))" % REPO)
+        r = subprocess.run([sys.executable, "-c", code], input=data, stdout=subprocess.PIPE,
+                           stderr=subprocess.PIPE, env=self.env(), cwd=self.work)
+        self.assertEqual(r.returncode, 5)
+        via_cli = self.read()
+        os.unlink(self.limits_file)
+        fast = self.tap(data, command=["sh", "-c", "cat >/dev/null; exit 5"])
+        self.assertEqual(fast.returncode, 5)
+        self.assertEqual(self.read(), via_cli)
+
+    def test_state_dir_resolution_matches_config(self):
+        # Without GRID_FLEET_STATE_DIR the fast path (which never loads config) must land in
+        # the same place config.state_dir() resolves: XDG_STATE_HOME, then ~/.local/state.
+        from grid_fleet import config as cfg
+        for extra in ({"XDG_STATE_HOME": os.path.join(self.work, "xdg")},
+                      {"XDG_STATE_HOME": "relative/is/ignored", "HOME": os.path.join(self.work, "home")},
+                      {"HOME": os.path.join(self.work, "home2")}):
+            env = self.env()
+            del env["GRID_FLEET_STATE_DIR"]
+            env.pop("XDG_STATE_HOME", None)
+            env.update(extra)
+            # config expands "~" from the PROCESS home, so point it at the tap's HOME too;
+            # this test must never resolve (or touch) the real state directory.
+            with mock.patch.dict(os.environ, {"HOME": env["HOME"]}):
+                expected = cfg.state_dir(env)
+            self.assertTrue(expected.startswith(self.work), expected)
+            self.tap(payload(five=(3.0, NOW + 10)), env=env, command=["true"])
+            with open(os.path.join(expected, "limits.json")) as fh:
+                self.assertEqual(json.load(fh)["five_hour"]["used_pct"], 3.0, extra)
+
+    def test_large_stdin_and_stdout_pass_through_without_deadlock(self):
+        # stdout is inherited and stdin is fed through a pipe: a 1 MB echo round trip must not
+        # stall and must be byte-identical.
+        data = bytes(range(256)) * 4096
+        r = self.tap(data, command=["cat"])
+        self.assertEqual((r.returncode, r.stdout), (0, data))
+
+    def test_original_sees_default_sigpipe(self):
+        # Python ignores SIGPIPE and ignored signals survive exec; the tap must reset it so a
+        # shell original dies on SIGPIPE exactly as when run directly.
+        cmd = ["sh", "-c", "cat >/dev/null; kill -s PIPE $$; echo survived"]
+        direct = subprocess.run(cmd, input=b"", stdout=subprocess.PIPE)
+        tapped = self.tap(payload(), command=cmd)
+        self.assertEqual(direct.stdout, b"")
+        self.assertEqual(tapped.stdout, b"")
+        self.assertEqual(tapped.returncode, 128 + signal.SIGPIPE)
+
+    def test_closed_stdin(self):
+        # sys.stdin is None; the stdin pipe may then land on fd 0 itself.
+        script = 'exec "$@" <&-'
+        argv = ["/bin/sh", "-c", script, "sh", sys.executable, BIN, "tap", "--", sys.executable, "-c",
+                "import sys; sys.stdout.write('len=%d' % len(sys.stdin.buffer.read())); sys.exit(4)"]
+        r = subprocess.run(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=self.env(), cwd=self.work)
+        self.assertEqual((r.returncode, r.stdout, r.stderr), (4, b"len=0", b""))
+
+
 class TestHostileNumbers(TapBase):
     """F2: a value too big for a float must read as "not a number", never raise.
 
@@ -551,10 +673,13 @@ class TestNoCredentialsNoNetwork(unittest.TestCase):
                           "settings.json", "token", "security", "curl", "wget")
 
     # Every file that runs on the tap's path is audited, not just limits.py.
-    AUDITED = [LIMITS_SRC]
+    AUDITED = [LIMITS_SRC, PATHS_SRC, BIN]
 
     # subprocess entry points whose first argument is the command to run.
     SUBPROCESS_FUNCS = {"run", "call", "check_call", "check_output", "Popen", "getoutput", "getstatusoutput"}
+    # The tap spawns with os.posix_spawnp (subprocess is too slow to import): same rule for os.*.
+    OS_SPAWN_FUNCS = {"posix_spawn", "posix_spawnp", "execv", "execve", "execvp", "execvpe",
+                      "execl", "execle", "execlp", "execlpe", "popen", "system"}
 
     def setUp(self):
         self.trees = []
@@ -574,8 +699,9 @@ class TestNoCredentialsNoNetwork(unittest.TestCase):
             if not isinstance(n, ast.Call):
                 continue
             f = n.func
-            is_subprocess = (isinstance(f, ast.Attribute) and f.attr in cls.SUBPROCESS_FUNCS
-                             and isinstance(f.value, ast.Name) and f.value.id == "subprocess")
+            is_subprocess = (isinstance(f, ast.Attribute) and isinstance(f.value, ast.Name)
+                             and ((f.value.id == "subprocess" and f.attr in cls.SUBPROCESS_FUNCS)
+                                  or (f.value.id == "os" and f.attr in cls.OS_SPAWN_FUNCS)))
             if not is_subprocess:
                 continue
             command = n.args[0] if n.args else next((k.value for k in n.keywords if k.arg == "args"), None)
@@ -648,11 +774,16 @@ class TestNoCredentialsNoNetwork(unittest.TestCase):
             "import subprocess\nsubprocess.run('curl x', shell=True)",
             "import subprocess\nsubprocess.run(command, shell=True)",
             "import subprocess\nsubprocess.Popen(['a'] + command)",
+            "import os\nos.posix_spawnp('curl', ['curl', 'x'], os.environ)",
+            "import os\nos.execvp('curl', ['curl'])",
+            "import os\nos.posix_spawnp(command[0], command, os.environ)",
         ]
         for src in flagged:
             self.assertTrue(self.hardcoded_subprocess_calls(ast.parse(src)), src)
         self.assertEqual(self.hardcoded_subprocess_calls(
             ast.parse("import subprocess\nsubprocess.run(command, input=data, stdout=subprocess.PIPE)")), [])
+        self.assertEqual(self.hardcoded_subprocess_calls(
+            ast.parse("import os\nos.posix_spawnp(program, command, os.environ)")), [])
 
     def test_tap_never_opens_a_socket_at_runtime(self):
         # Dynamic backstop (in-process): any socket connect during capture would raise.

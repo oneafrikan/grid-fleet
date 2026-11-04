@@ -3,6 +3,13 @@
 
 Kept deliberately tiny: it only makes the repo importable (so a symlink to this
 file on PATH works from anywhere) and hands over to grid_fleet.cli.main.
+
+One exception, for speed: `tap` runs on every statusLine refresh and every
+millisecond of interpreter start-up is added to Claude Code's statusLine. The
+cli module imports argparse and the config module imports dataclasses/typing
+(about 10 ms), so `tap` is dispatched here, BEFORE those imports, to
+grid_fleet.limits.tap_fast, which needs none of them. It returns None for any
+argv it does not fully understand, and then everything falls through to cli.
 """
 import os
 import sys
@@ -12,7 +19,13 @@ import sys
 _here = os.path.dirname(os.path.realpath(__file__))
 sys.path.insert(0, os.path.dirname(_here))
 
-from grid_fleet.cli import main  # noqa: E402  (import after sys.path tweak)
-
 if __name__ == "__main__":
+    if sys.argv[1:2] == ["tap"]:
+        from grid_fleet.limits import tap_fast  # noqa: E402  (import after sys.path tweak)
+
+        _rc = tap_fast(sys.argv[1:])
+        if _rc is not None:
+            sys.exit(_rc)
+    from grid_fleet.cli import main  # noqa: E402
+
     sys.exit(main())

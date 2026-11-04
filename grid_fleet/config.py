@@ -29,9 +29,13 @@ import json
 import os
 import re
 import socket
-import time
 from dataclasses import dataclass
 from typing import Mapping, Optional, Tuple
+
+# ConfigError, state_dir, now and the env/XDG helpers live in paths.py (a light module the
+# statusLine tap can import without paying for this file's imports) and are re-exported
+# here, so cfg.ConfigError / cfg.state_dir / cfg.now keep working for everyone else.
+from grid_fleet.paths import ConfigError, _env, _home, _xdg, now, state_dir  # noqa: F401
 
 SCHEMA = 1
 ALLOWED_INTERVALS = (300, 600, 900)
@@ -45,10 +49,6 @@ HOST_NAME_MAX = 64
 # Used when sanitising leaves nothing (empty input, or only dots).
 HOST_NAME_FALLBACK = "host"
 _BAD_HOST_CHARS = re.compile(r"[^A-Za-z0-9._-]")
-
-
-class ConfigError(Exception):
-    """The config file (or an override) is unusable. Message is user-facing."""
 
 
 def sanitize_host_name(raw: object) -> str:
@@ -66,37 +66,12 @@ def sanitize_host_name(raw: object) -> str:
     return cleaned or HOST_NAME_FALLBACK
 
 
-def _env(env: Optional[Mapping[str, str]]) -> Mapping[str, str]:
-    # Callers (and tests) may pass an explicit mapping; default is the process env.
-    return os.environ if env is None else env
-
-
-def _home() -> str:
-    return os.path.expanduser("~")
-
-
-def _xdg(env: Mapping[str, str], var: str, default_rel: str) -> str:
-    # XDG spec: only absolute paths are valid; anything else is ignored.
-    val = env.get(var, "")
-    if val and os.path.isabs(val):
-        return val
-    return os.path.join(_home(), default_rel)
-
-
 def config_path(env: Optional[Mapping[str, str]] = None) -> str:
     e = _env(env)
     override = e.get("GRID_FLEET_CONFIG")
     if override:
         return override
     return os.path.join(_xdg(e, "XDG_CONFIG_HOME", ".config"), "grid-fleet", "config.json")
-
-
-def state_dir(env: Optional[Mapping[str, str]] = None) -> str:
-    e = _env(env)
-    override = e.get("GRID_FLEET_STATE_DIR")
-    if override:
-        return override
-    return os.path.join(_xdg(e, "XDG_STATE_HOME", ".local/state"), "grid-fleet")
 
 
 def claude_dir(env: Optional[Mapping[str, str]] = None) -> str:
@@ -112,17 +87,6 @@ def claude_dir(env: Optional[Mapping[str, str]] = None) -> str:
 
 def claude_bin(env: Optional[Mapping[str, str]] = None) -> str:
     return _env(env).get("GRID_FLEET_CLAUDE_BIN") or "claude"
-
-
-def now() -> int:
-    """Current epoch seconds. EVERYONE uses this, never time.time() directly."""
-    fixed = os.environ.get("GRID_FLEET_NOW")
-    if fixed:
-        try:
-            return int(float(fixed))
-        except ValueError:
-            raise ConfigError("GRID_FLEET_NOW must be epoch seconds, got %r" % fixed)
-    return int(time.time())
 
 
 def _short_hostname() -> str:
