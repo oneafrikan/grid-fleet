@@ -17,10 +17,10 @@ snapshot is older than interval_s; design.md "Staleness"):
         collect + write_snapshot; returns the snapshot. Raises OSError on write failure.
     snapshot_path(config) -> str
 
-`agents` (group 6 leaderboard) is owned by a later group and stays None here.
 `limits` is read from the local limits.json the statusLine tap writes (None when
-never captured). `tokens.by_day` is filled now because it falls out
-of the same hourly buckets.
+never captured). `tokens.by_day` and `agents.last_7d` (the subagent leaderboard)
+both fall out of the same hourly buckets, so they come from the one scan and are
+null together with `tokens`.
 
 Privacy: nothing in the snapshot, the one-line summary or any warning comes
 from a transcript, cwd, session name, project directory or session id. See
@@ -58,6 +58,7 @@ def collect(config, opener: Callable = open) -> dict:
     warnings.extend(swarn)
 
     tokens = None
+    agents = None
     projects = os.path.join(config.claude_dir, "projects")
     if not os.path.isdir(projects):
         # Unknown layout / never used Claude here: null, not zeros.
@@ -71,6 +72,7 @@ def collect(config, opener: Callable = open) -> dict:
             warnings.append("no transcripts found while sessions are busy")
         else:
             tokens = sources_claude.summarize_tokens(scan.entries, now)
+            agents = sources_claude.summarize_agents(scan.entries, now)
 
     return {
         "schema": SCHEMA,
@@ -84,7 +86,7 @@ def collect(config, opener: Callable = open) -> dict:
         "interval_s": config.interval_s,
         "sessions": sessions,
         "tokens": tokens,
-        "agents": None,  # group 6
+        "agents": agents,
         # Copied from the tap's limits.json; None if absent or invalid (never zeros).
         "limits": limits_mod.read_limits(config),
         "warnings": warnings,

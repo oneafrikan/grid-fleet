@@ -12,7 +12,8 @@ Public API (snapshot.py is the main caller):
     collect_sessions(claude_bin, timeout=None) -> (counts or None, warnings)
     scan_transcripts(projects_dir, state_dir, now, opener=open) -> ScanResult
     summarize_tokens(entries, now) -> dict    last_24h / last_7d / by_day
-    window_keys(now) -> WindowKeys            hour-key bounds, reused by the group 6 leaderboard
+    summarize_agents(entries, now) -> dict    {"last_7d": [{type, invocations, output}, ...]}
+    window_keys(now) -> WindowKeys            hour-key bounds shared by both summaries
     atomic_write_json(path, obj)              tmp + rename, mode 0600
 
 Privacy contract (design.md "Incremental token summing"): from a transcript
@@ -66,6 +67,9 @@ LABEL_MAIN = "main"
 LABEL_UNKNOWN = "unknown"
 _LABEL_BAD_CHARS = re.compile(r"[^A-Za-z0-9._:-]")
 _LABEL_MAX = 64
+# A real meta file is a few bytes ({"agentType": "..."}). Read at most this much so a
+# hostile or corrupt multi-GB "meta" file cannot exhaust memory; larger means "unknown".
+_META_MAX_BYTES = 64 * 1024
 
 # "2026-10-21T14:03:00.000Z" -> hour key "2026-10-21T14". Anything not in this
 # shape takes the slower datetime path below.
@@ -272,7 +276,13 @@ class ScanResult(object):
 
 
 def _sanitize_label(raw: object) -> str:
-    """agentType -> a short, safe label; non-strings and empties become "unknown"."""
+    """agentType -> a short, safe label; non-strings and empties become "unknown".
+
+    The spec is silent on odd agent type strings, so this is the conservative rule:
+    printable ASCII from [A-Za-z0-9._:-] only (everything else, control characters and
+    non-ASCII included, becomes "_"), at most 64 characters. It is applied again when the
+    leaderboard is built, so even a hand-edited cache cannot put an unsafe string in a snapshot.
+    """
     if not isinstance(raw, str) or not raw:
         return LABEL_UNKNOWN
     return _LABEL_BAD_CHARS.sub("_", raw)[:_LABEL_MAX]
@@ -298,7 +308,10 @@ def _read_agent_label(path: str, opener: Callable) -> str:
     meta = path[: -len(".jsonl")] + ".meta.json"
     try:
         with opener(meta, "rb") as fh:
-            data = json.loads(fh.read().decode("utf-8", "replace"))
+            raw = fh.read(_META_MAX_BYTES + 1)
+        if len(raw) > _META_MAX_BYTES:
+            return LABEL_UNKNOWN  # not a plausible meta file
+        data = json.loads(raw.decode("utf-8", "replace"))
     except (OSError, ValueError, RecursionError):
         return LABEL_UNKNOWN
     return _sanitize_label(data.get("agentType") if isinstance(data, dict) else None)
@@ -543,3 +556,37 @@ def summarize_tokens(entries: Dict[str, dict], now: int) -> dict:
         row.update(as_dict(per_day[d]))
         by_day.append(row)
     return {"last_24h": as_dict(t24), "last_7d": as_dict(t7), "by_day": by_day}
+
+
+def summarize_agents(entries: Dict[str, dict], now: int) -> dict:
+    """Subagent leaderboard over the 168-bucket 7d window (spec: Subagent leaderboard).
+
+    Derived entirely from the offset cache (`agent` label + `hours` buckets), so it adds no
+    file reads and needs no new cache fields. One cache entry is one transcript:
+
+      invocations  transcripts with at least one usage event (hour bucket) in the window.
+                   This is the decided definition (design.md): not spawn events.
+      output       output tokens in the window buckets, summed over those transcripts.
+
+    Types come from the per-file label: "main" for session transcripts, `agentType` from the
+    meta file for subagents, "unknown" when that is missing or unusable. Transcripts deleted
+    within the window still count, same as the token totals.
+
+    Order: invocations descending. The spec gives no tie-break; ties are broken by output
+    descending, then type ascending, so the list is deterministic run to run.
+    """
+    keys = WindowKeys(now)
+    acc = {}  # type: Dict[str, List[int]]  label -> [invocations, output]
+    for ent in entries.values():
+        # An empty bucket dict (no usage lines yet) is not an invocation.
+        in_window = [vec for key, vec in ent["hours"].items() if keys.in_7d(key)]
+        if not in_window:
+            continue
+        # Re-sanitise: the cache is a file on disk and is not trusted to hold a safe label.
+        label = _sanitize_label(ent["agent"])
+        slot = acc.setdefault(label, [0, 0])
+        slot[0] += 1
+        slot[1] += sum(vec[0] for vec in in_window)
+    rows = [{"type": t, "invocations": v[0], "output": v[1]} for t, v in acc.items()]
+    rows.sort(key=lambda r: (-r["invocations"], -r["output"], r["type"]))
+    return {"last_7d": rows}
