@@ -40,7 +40,7 @@ Verdict:
   appended since the last run, far under the 5 s fail line.
 - The 2 s warm budget in the spec is CONFIRMED (no revision proposed). Measured headroom is
   large (naive 0.34 to 0.50 s; incremental floor 0.004 s).
-- `CLAUDE_CONFIG_DIR` relocation check: pending HUMAN (not attempted by the agent).
+- `CLAUDE_CONFIG_DIR` relocation check: was pending at this point; done later, result YES (see "2.1 sub-check" below).
 
 ### 2.3 Duplicate usage lines: three counting rules on the three largest main sessions
 
@@ -59,6 +59,31 @@ Verdict:
 - Rule (a) overcounts by roughly 2.6x to 3.9x, so the collapse is required, not optional.
 - Every usage line in the sample carried a `message.id`. Lines without an id are never
   collapsed by the implementation (nothing to match on).
+
+### 2.8 Cold and warm `collect` on the real corpus (reference machine)
+
+Run on the maintainer's macOS laptop, real Claude directory, at commit `47f418f`. Numbers only.
+
+| Run | Wall time |
+|---|---|
+| cold (empty offsets cache; OS file cache probably warm) | 1.20 s |
+| warm, run 1 | 0.16 s |
+| warm, run 2 | 0.16 s |
+
+Verdict:
+
+- PASS. Warm 0.16 s against the 2 s budget.
+- "Cold" here means the offsets cache was empty, not that the OS file cache was cold (it cannot be
+  forced without sudo, same caveat as 2.1).
+
+### 2.1 sub-check: does `CLAUDE_CONFIG_DIR` relocate the projects dir?
+
+- Method: a throwaway `claude -p` with `CLAUDE_CONFIG_DIR` set to an empty temp dir.
+- Result: YES. A transcript `projects/<dir>/<uuid>.jsonl` was written under the temp config dir.
+- The session reported "Not logged in", so no API call was made and no credentials were copied.
+  The temp dirs were removed afterwards.
+- Claude Code version observed on that laptop: 2.1.318. The code's tested list holds 2.1.305;
+  task 9.4 records the final version.
 
 ## Fleet bring-up (real hosts)
 
@@ -127,6 +152,26 @@ Findings:
    holds 2.1.305). Expected behaviour. Adding the version to the tested list is task 9.4 and needs
    the human.
 3. No timers exist yet (Group 8), so all pushes were manual.
+
+### Fleet bring-up, second round (two more machines)
+
+Two more machines were onboarded as spokes later, so six hosts now report to the hub.
+
+| Platform | Python | Suite result |
+|---|---|---|
+| Arch-based Linux | 3.14 | 253 tests OK, 1 skip (at the commit that machine was on) |
+| Ubuntu-based Linux server | 3.12 | 253 tests OK, 1 skip (at the commit that machine was on) |
+
+- Each ran `collect` and `push`; both deliveries reached the hub. All six hosts now have an inbox file.
+- The server could not read the private repo with its own GitHub identity, so it received a
+  `git archive` copy without `.git`. It becomes a plain clone once the repo is public.
+
+Stale-versus-fresh observation:
+
+- A host paused beyond 2 x its interval showed grey `unknown` and was left out of the totals
+  (the observation behind the 5.1 sign-off).
+- Consequence for limits: at 47f418f the hub builds the limits strip from fresh hosts only. The
+  maintainer has decided to include stale hosts' limits; that change is in progress.
 
 ## U7 / Group 7 spikes
 
