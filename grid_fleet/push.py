@@ -39,6 +39,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 from typing import Optional
 
 from grid_fleet import config as cfg
@@ -66,7 +67,18 @@ LOCAL_HUB = "local"
 # hub's login shell is irrelevant.
 #
 #   umask 077         -> files are 0600
-#   cat > .H.json.tmp -> the in-flight upload lives in a dot-file readers ignore
+#   t=.H.json.$$.tmp  -> the in-flight upload lives in a dot-file readers ignore. The
+#                        name carries the shell PID ($$) so it is UNIQUE per push: a
+#                        manual push overlapping a timer push used to share one fixed
+#                        tmp, the second `cat >` truncated it while the first kept
+#                        writing at its old offset, and the rename published a file
+#                        that was part NUL bytes yet still ended in a newline.
+#   trap c EXIT       -> removes the tmp on every exit path (failed check, cat error,
+#                        completed mv: then it is already gone and `rm -f` is a no-op).
+#                        A function, not `trap 'rm ...'`, because the script must hold
+#                        no single quote (it sits inside one single-quoted argument).
+#                        SIGKILL / a killed session skips the trap and leaves the dot-
+#                        file behind; readers ignore it.
 #   [ ... -eq 1 ]     -> completeness check: only rename if the tmp file ends in
 #                        "\n". Snapshots are always written as JSON + "\n"
 #                        (sources_claude.atomic_write_json). If the client drops
@@ -82,9 +94,10 @@ LOCAL_HUB = "local"
 #   mv                -> atomic rename over the previous <host>.json
 UPLOAD_SCRIPT = (
     'umask 077; d="${XDG_STATE_HOME:-$HOME/.local/state}/grid-fleet/inbox"; '
-    'mkdir -p "$d" && cat > "$d/.@HOST@.json.tmp" && '
-    '[ "$(tail -c 1 "$d/.@HOST@.json.tmp" | wc -l)" -eq 1 ] && '
-    'mv "$d/.@HOST@.json.tmp" "$d/@HOST@.json"'
+    't="$d/.@HOST@.json.$$.tmp"; c() { rm -f "$t"; }; trap c EXIT; '
+    'mkdir -p "$d" && cat > "$t" && '
+    '[ "$(tail -c 1 "$t" | wc -l)" -eq 1 ] && '
+    'mv "$t" "$d/@HOST@.json"'
 )
 
 # Whitespace or ASCII control chars (incl. DEL) anywhere in the alias.
@@ -172,19 +185,20 @@ def fresh_snapshot_bytes(config) -> bytes:
 
 
 def deliver_local(config, data: bytes) -> None:
-    """Write `data` as <state_dir>/inbox/<host>.json: tmp dot-file + atomic rename.
+    """Write `data` as <state_dir>/inbox/<host>.json: unique tmp dot-file + atomic rename.
 
-    Mirrors the remote script (umask 077, `.<host>.json.tmp`, mv) so a reader
-    never sees a partial file. Raises OSError.
+    Mirrors the remote script (owner-only, dot-prefixed tmp, rename) so a reader never
+    sees a partial file. The tmp name is unique per call (mkstemp: O_EXCL, so it never
+    follows a pre-planted symlink, and mode 0600), so two overlapping deliveries cannot
+    truncate each other's file. The tmp is removed on any failure. Raises OSError.
     """
     host = cfg.sanitize_host_name(config.host_name)
     final = hub.inbox_path(config.state_dir, host)
-    tmp = hub.inbox_tmp_path(config.state_dir, host)
-    os.makedirs(os.path.dirname(final), mode=0o700, exist_ok=True)
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    inbox = os.path.dirname(final)
+    os.makedirs(inbox, mode=0o700, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix="." + host + ".json.", suffix=".tmp", dir=inbox)
     try:
         with os.fdopen(fd, "wb") as fh:
-            os.fchmod(fh.fileno(), 0o600)  # in case the tmp pre-existed with other bits
             fh.write(data)
         os.replace(tmp, final)
     except BaseException:

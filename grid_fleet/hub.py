@@ -4,7 +4,7 @@ Owner: Group 4 unit (grid-frontend-dev) for everything beyond the path helpers.
 Layout (design.md "Hub"), under the hub state dir:
 
     inbox/<host>.json          latest snapshot per host (atomic rename)
-    inbox/.<host>.json.tmp     in-flight upload; ignored by readers
+    inbox/.<host>.json.<uniq>.tmp   in-flight upload (unique per push); ignored by readers
 
 Reader contract (hub-view-tui spec):
   - READ-ONLY. This module never creates, writes, renames or deletes anything.
