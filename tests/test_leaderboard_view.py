@@ -210,12 +210,17 @@ class TestLeaderboardHostileInput(PanelCase):
         rows = [agent_row("t%d" % i, 1) for i in range(hub.MAX_AGENT_ROWS_PER_HOST + 500)]
         self.put("alpha", agents=make_agents(*rows))
         self.assertLessEqual(len(self.hubstate().agents), hub.LEADERBOARD_SIZE)
-        self.assertNotIn("t%d" % (hub.MAX_AGENT_ROWS_PER_HOST + 10), self.board())
 
-
-# ---------------------------------------------------------------------------
-# hub: by_day aggregation
-# ---------------------------------------------------------------------------
+    def test_rows_beyond_the_per_host_cap_are_ignored_even_if_they_would_win(self):
+        # H17. The old check used equal-weight rows, so an uncapped read changed nothing
+        # visible. Here the row just past the cap would outrank everything if it were read.
+        cap = hub.MAX_AGENT_ROWS_PER_HOST
+        rows = [agent_row("t%d" % i, 1) for i in range(cap - 1)]
+        rows.append(agent_row("last-read", 50))        # index cap-1: the last row that counts
+        rows.append(agent_row("beyond-cap", 10 ** 6))  # index cap: must be ignored
+        self.put("alpha", agents=make_agents(*rows))
+        self.assertNotIn("beyond-cap", self.board())
+        self.assertEqual(self.board_order()[0], "last-read")  # the boundary row still counts
 
 
 class TestByDayAggregation(PanelCase):
@@ -275,6 +280,17 @@ class TestByDayAggregation(PanelCase):
         got = self.days()
         self.assertEqual(len(got), 7)
         self.assertEqual(got[-1][0], "2026-10-20")
+
+    def test_by_day_rows_beyond_the_per_host_cap_are_ignored(self):
+        # H18. Rows past MAX_BY_DAY_PER_HOST would win the "latest seven" cut if they were
+        # read, so the surviving days prove the cap (and that the last allowed row counts).
+        cap = hub.MAX_BY_DAY_PER_HOST
+        early = by_day_rows("2026-01-01", [1] * cap)   # the rows that are read
+        late = by_day_rows("2026-10-15", [100] * 7)    # beyond the cap: must be ignored
+        self.put("alpha", tokens=make_tokens(early + late))
+        got = self.days()
+        self.assertEqual([d for d, _ in got], ["2026-01-%02d" % n for n in range(cap - 6, cap + 1)])
+        self.assertTrue(all(o == 1 for _, o in got))
 
     def test_by_day_of_the_wrong_shape_is_ignored(self):
         self.put("alpha", tokens={"last_24h": {}, "last_7d": {}, "by_day": "lots"})
