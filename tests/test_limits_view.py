@@ -12,11 +12,13 @@ of 7.4. All names are invented. These tests verify my own work only; independent
 verification is qa-engineer's.
 """
 
+import os
 import tempfile
 import unittest
 
 from grid_fleet import hub, view
-from helpers.synthetic_snapshot import (NOW, NULL, limit_window, make_limits, make_snapshot,
+from helpers.synthetic_snapshot import (NOW, NULL, agent_row, by_day_rows, limit_window,
+                                        make_agents, make_limits, make_snapshot, make_tokens,
                                         write_inbox_file)
 
 # Reset instants relative to the hub clock: 5h window in 2h07m, 7d window in 4d19h.
@@ -41,6 +43,9 @@ class LimitsCase(unittest.TestCase):
 
     def hubstate(self):
         return hub.read_hub(self.state_dir, NOW)
+
+    def host_status(self, name):
+        return [h for h in self.hubstate().hosts if h.name == name][0].status
 
     def block(self, account="default"):
         return [b for b in self.hubstate().limits if b.account == account][0]
@@ -123,21 +128,95 @@ class TestAggregation(LimitsCase):
         self.assertIsNone(b.seven_day.pct)  # None, never 0.0
         self.assertFalse(b.seven_day.expired)
 
-    def test_stale_host_limits_are_excluded(self):
-        # The stale host holds the NEWEST capture; it must not win over the fresh host.
+    # -- stale hosts (maintainer decision: limits belong to the account, not the host) ------
+
+    def test_stale_host_holding_the_newest_capture_wins(self):
+        # The stale host holds the NEWEST capture: it wins, and its age is the capture age
+        # (hub now - captured_at), not the age of its inbox file.
         self.put("alpha", limits=both(30.0, 10.0, captured_at=NOW - 900))
         self.put("beta", age_s=41 * 60, limits=both(95.0, 90.0, captured_at=NOW - 30))
+        self.assertEqual(self.host_status("beta"), hub.STALE)  # the premise of the test
+        b = self.block()
+        self.assertEqual((b.five_hour.pct, b.seven_day.pct), (95.0, 90.0))
+        self.assertEqual((b.five_hour.age_s, b.seven_day.age_s), (30, 30))
+
+    def test_fresh_host_with_a_newer_capture_still_beats_a_stale_one(self):
+        # Staleness is irrelevant to the contest: only captured_at decides.
+        self.put("alpha", limits=both(30.0, 10.0, captured_at=NOW - 30))
+        self.put("beta", age_s=41 * 60, limits=both(95.0, 90.0, captured_at=NOW - 900))
         b = self.block()
         self.assertEqual((b.five_hour.pct, b.seven_day.pct), (30.0, 10.0))
 
-    def test_stale_only_account_shows_no_block(self):
-        self.put("alpha", account="team-a", limits=both())
-        self.put("beta", account="team-b", age_s=41 * 60, limits=both())
-        self.assertEqual([b.account for b in self.hubstate().limits], ["team-a"])
+    def test_stale_host_can_supply_one_window_while_a_fresh_host_supplies_the_other(self):
+        self.put("alpha", limits=make_limits(NOW - 60, limit_window(70.0, FIVE_RESET)))
+        self.put("beta", age_s=41 * 60, limits=make_limits(NOW - 900, limit_window(10.0, FIVE_RESET),
+                                                           limit_window(33.0, SEVEN_RESET)))
+        b = self.block()
+        self.assertEqual((b.five_hour.pct, b.five_hour.age_s), (70.0, 60))
+        self.assertEqual((b.seven_day.pct, b.seven_day.age_s), (33.0, 900))
 
-    def test_only_stale_hosts_gives_the_unnamed_unknown_block(self):
-        self.put("alpha", age_s=41 * 60, limits=both())
-        self.assertEqual(self.hubstate().limits, (hub.AccountLimits(""),))
+    def test_stale_only_account_shows_a_block_with_its_capture_age(self):
+        self.put("alpha", account="team-a", limits=both(40.0, 11.0))
+        self.put("beta", account="team-b", age_s=41 * 60,
+                 limits=both(61.0, 22.0, captured_at=NOW - 2400))
+        s = self.hubstate()
+        self.assertEqual([b.account for b in s.limits], ["team-a", "team-b"])
+        b = self.block("team-b")
+        self.assertEqual((b.five_hour.pct, b.seven_day.pct), (61.0, 22.0))
+        self.assertEqual((b.five_hour.age_s, b.seven_day.age_s), (2400, 2400))
+
+    def test_only_stale_hosts_gives_a_named_block_not_the_unnamed_unknown_one(self):
+        self.put("alpha", age_s=41 * 60, limits=both(61.0, 22.0))
+        s = self.hubstate()
+        self.assertEqual(s.fresh, 0)
+        self.assertEqual([b.account for b in s.limits], ["default"])
+        self.assertEqual((s.limits[0].five_hour.pct, s.limits[0].seven_day.pct), (61.0, 22.0))
+
+    def test_stale_host_without_limits_still_creates_an_all_unknown_block(self):
+        # Same rule as for a fresh host: a snapshot without limits names its account.
+        self.put("alpha", account="team-a", age_s=41 * 60, limits=NULL)
+        b = self.block("team-a")
+        self.assertEqual((b.five_hour, b.seven_day), (hub.LimitWindow(), hub.LimitWindow()))
+
+    def test_stale_hosts_expired_window_renders_unknown(self):
+        # The expiry rule keeps a stale capture honest: its 5h window has reset since.
+        self.put("alpha", age_s=41 * 60, limits=make_limits(
+            NOW - 2400, limit_window(42.0, NOW - 1), limit_window(18.0, SEVEN_RESET)))
+        b = self.block()
+        self.assertIsNone(b.five_hour.pct)
+        self.assertTrue(b.five_hour.expired)
+        self.assertEqual((b.seven_day.pct, b.seven_day.age_s), (18.0, 2400))
+
+    def test_a_three_day_old_stale_capture_with_a_future_reset_is_kept(self):
+        # A 7d window captured 3d04h ago still resets in the future: shown, with its age.
+        age = 3 * 86400 + 4 * 3600
+        self.put("alpha", age_s=age, limits=make_limits(NOW - age, None, limit_window(64.0, SEVEN_RESET)))
+        b = self.block()
+        self.assertEqual((b.seven_day.pct, b.seven_day.age_s), (64.0, age))
+        self.assertIsNone(b.five_hour.pct)  # nothing captured for 5h: unknown, not 0
+
+    def test_future_dated_capture_on_a_stale_host_is_still_ignored(self):
+        self.put("alpha", limits=both(30.0, 10.0, captured_at=NOW - 900))
+        self.put("beta", age_s=41 * 60,
+                 limits=both(95.0, 90.0, captured_at=NOW + hub.MAX_CAPTURE_SKEW_S + 1))
+        b = self.block()
+        self.assertEqual((b.five_hour.pct, b.seven_day.pct), (30.0, 10.0))
+
+    def test_stale_host_is_still_excluded_from_totals_leaderboard_and_sparkline(self):
+        # Only the limits strip changes: the other aggregates keep dropping stale hosts.
+        self.put("alpha", sessions={"busy": 2, "waiting": 1}, limits=both(30.0, 10.0),
+                 agents=make_agents(agent_row("core-researcher", 5)),
+                 tokens=make_tokens(by_day_rows("2026-10-20", [1] * 7)))
+        self.put("beta", age_s=41 * 60, sessions={"busy": 9, "waiting": 9},
+                 limits=both(95.0, 90.0, captured_at=NOW - 30),
+                 agents=make_agents(agent_row("core-researcher", 5), agent_row("stale-only", 99)),
+                 tokens=make_tokens(by_day_rows("2026-10-20", [100] * 7)))
+        s = self.hubstate()
+        self.assertEqual(s.limits[0].five_hour.pct, 95.0)  # the strip includes beta ...
+        self.assertEqual((s.fresh, s.busy.value, s.waiting.value), (1, 2, 1))  # ... nothing else does
+        self.assertEqual(s.out_24h, hub.Total(412000, True))
+        self.assertEqual([(a.type, a.invocations) for a in s.agents], [("core-researcher", 5)])
+        self.assertEqual([d.output for d in s.by_day], [1] * 7)
 
     def test_clock_skew_between_hosts_does_not_matter_for_age(self):
         # Age is hub now - captured_at; a capture stamped slightly in the future (within the
@@ -285,12 +364,48 @@ class TestStripText(LimitsCase):
         self.assertIn("unknown", self.row("7d", texts))
         self.assertNotIn("0%", self.row("7d", texts))
 
-    def test_stale_hosts_limits_are_not_shown(self):
+    def test_stale_host_holding_the_newest_limits_is_shown_with_its_capture_age(self):
         self.put("alpha", limits=both(30.0, 10.0, captured_at=NOW - 900))
         self.put("beta", age_s=41 * 60, limits=both(95.0, 90.0, captured_at=NOW - 30))
-        out = "\n".join(self.text())
-        self.assertIn("30%", out)
-        self.assertNotIn("95%", out)
+        texts = self.text()
+        self.assertIn("95%", self.row("5h", texts))
+        self.assertIn("90%", self.row("7d", texts))
+        self.assertIn("as of <1m ago", self.row("5h", texts))
+        self.assertNotIn("30%", "\n".join(texts))
+
+    def test_stale_only_account_gets_a_named_block(self):
+        self.put("alpha", account="team-a", limits=both(40.0, 11.0))
+        self.put("beta", account="team-b", age_s=41 * 60,
+                 limits=both(61.0, 22.0, captured_at=NOW - 2400))
+        texts = self.text()
+        out = "\n".join(texts)
+        self.assertEqual(out.count("LIMITS"), 2)
+        self.assertIn("account team-b", out)
+        self.assertIn("61%", self.row("5h", texts, 1))
+        self.assertIn("as of 40m ago", self.row("5h", texts, 1))
+
+    def test_three_day_old_capture_label_stays_one_short_token(self):
+        # fmt_age gives '<days>d<hh>h' from 24 h up: one unspaced token, so the row keeps its
+        # `as of <age> ago` shape and fits the narrow layouts.
+        age = 3 * 86400 + 4 * 3600
+        self.put("alpha", age_s=age, limits=make_limits(NOW - age, None, limit_window(64.0, SEVEN_RESET)))
+        row = self.row("7d")
+        self.assertIn("64%", row)
+        self.assertIn("as of 3d04h ago", row)
+        self.assertIn("unknown", self.row("5h"))
+
+    def test_80x24_capture_with_a_stale_host_holding_the_newest_limits(self):
+        # Fixture for the hand-off: alpha is fresh with an older capture, beta went quiet
+        # 41 min ago but holds the newest capture. The strip shows beta's numbers; the hosts
+        # table still greys beta out and keeps it out of the totals.
+        self.put("alpha", limits=both(30.0, 10.0, captured_at=NOW - 900))
+        self.put("beta", age_s=41 * 60, limits=both(95.0, 90.0, captured_at=NOW - 30))
+        texts = self.text(80, 24)
+        self.assertLessEqual(len(texts), 24)  # render draws only what it has, not padding
+        self.assertTrue(all(len(t) <= 80 for t in texts))
+        self.assertIn("stale 41m", "\n".join(texts))
+        if os.environ.get("GRID_FLEET_PRINT_CAPTURE"):  # opt-in: print the capture for reports
+            print("\n".join(texts))
 
     def test_old_capture_age_is_printed(self):
         self.put("alpha", limits=both(captured_at=NOW - 2 * 3600 - 300))

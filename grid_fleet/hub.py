@@ -27,7 +27,7 @@ Public API:
     build_state(scan, now, expected_hosts=()) -> HubState   PURE: staleness + aggregation
     read_hub(state_dir, now, expected_hosts=()) -> HubState scan + build in one call
     Total(value, complete)                       a column total; see its docstring
-    build_limits(fresh_entries, now)             PURE: per-account limits blocks (task 7.4)
+    build_limits(entries, now)                   PURE: per-account limits blocks (task 7.4)
     build_agents / build_by_day(fresh_entries)   PURE: leaderboard + sparkline data (task 6.2)
 """
 
@@ -185,7 +185,7 @@ class LimitWindow:
 @dataclass(frozen=True)
 class AccountLimits:
     """The limits block for one account label. `account` is "" only for the placeholder
-    block shown when there is no fresh host at all (so nothing names an account)."""
+    block shown when no host has a snapshot at all (so nothing names an account)."""
 
     account: str
     five_hour: LimitWindow = LimitWindow()
@@ -226,8 +226,9 @@ class HubState:
     out_7d: Total
     cache_24h: Total
     cache_7d: Total
-    # One block per account label among the fresh hosts, sorted by label. Never empty:
-    # with nothing to show, one unknown block (see build_limits).
+    # One block per account label among ALL hosts that have a snapshot (fresh AND stale:
+    # limits belong to the account, not the host; see build_limits), sorted by label. Never
+    # empty: with nothing to show, one unknown block.
     limits: Tuple[AccountLimits, ...] = ()
     # Task 6.2: top LEADERBOARD_SIZE agent types (invocations desc, then type asc) and the
     # last SPARK_DAYS UTC dates of output tokens, both over FRESH hosts only. Empty tuple
@@ -460,7 +461,7 @@ def _snapshot_limits(snapshot: dict, now: int) -> Tuple[Optional[int], dict]:
 
 
 def _pick_window(candidates, window: str, now: int) -> LimitWindow:
-    """Choose one window from (captured_at, limits) pairs of one account's fresh hosts.
+    """Choose one window from (captured_at, limits) pairs of one account's hosts (any status).
 
     Each window is chosen independently: the greatest captured_at among the snapshots that
     carry a usable value for THIS window wins (a host that has only seen the 5h window must
@@ -486,15 +487,23 @@ def _pick_window(candidates, window: str, now: int) -> LimitWindow:
     return LimitWindow(pct, resets, age, False)
 
 
-def build_limits(fresh_entries, now: int) -> Tuple[AccountLimits, ...]:
-    """Per-account limits blocks from the FRESH hosts' snapshots (pure).
+def build_limits(entries, now: int) -> Tuple[AccountLimits, ...]:
+    """Per-account limits blocks from the snapshots of ALL hosts that have one (pure).
 
-    Stale hosts are excluded by the caller. Accounts are the labels of the fresh hosts
-    (a fresh host without limits still creates its account's all-unknown block). With no
-    fresh host at all, a single unnamed all-unknown block keeps the strip visible.
+    Maintainer decision (design.md "Limits across hosts": "among fresh-or-stale hosts"):
+    a stale host is NOT excluded here. Limits are a property of the account, not of the
+    host that happened to capture them, so a host that went quiet may still hold the newest
+    capture. The data stays honest without a staleness filter: the `as of <age>` label shows
+    how old the capture is, and the `resets_at` rule turns an expired window into unknown.
+    Totals, leaderboard and sparkline still exclude stale hosts; only this strip differs.
+
+    The caller passes the entries of every host with a valid snapshot (never-reported hosts
+    have none). Accounts are the labels of those hosts (a host without limits still creates
+    its account's all-unknown block). With no snapshot at all, a single unnamed all-unknown
+    block keeps the strip visible.
     """
     by_account = {}  # type: dict
-    for entry in fresh_entries:
+    for entry in entries:
         by_account.setdefault(_account_label(entry.snapshot), []).append(
             _snapshot_limits(entry.snapshot, now))
     if not by_account:
@@ -607,7 +616,9 @@ def build_state(scan: InboxScan, now: int, expected_hosts: Iterable[str] = ()) -
     hosts only; `expected_hosts` with no inbox entry become NEVER rows.
     """
     hosts = [_host_state(e, now) for e in scan.entries]
-    # Entries whose host is FRESH, in the scan's (file name) order: the limits source.
+    # Entries whose host is FRESH, in the scan's (file name) order: the source for totals,
+    # leaderboard and sparkline. The limits strip deliberately uses scan.entries (fresh AND
+    # stale; never-reported hosts have no entry) - see build_limits.
     fresh_entries = [e for e, h in zip(scan.entries, hosts) if h.status == FRESH]
     seen = set(h.name for h in hosts)
     for name in expected_hosts:
@@ -627,7 +638,7 @@ def build_state(scan: InboxScan, now: int, expected_hosts: Iterable[str] = ()) -
         out_7d=_sum(h.out_7d for h in fresh),
         cache_24h=_sum(h.cache_24h for h in fresh),
         cache_7d=_sum(h.cache_7d for h in fresh),
-        limits=build_limits(fresh_entries, now),
+        limits=build_limits(scan.entries, now),
         agents=build_agents(fresh_entries),
         by_day=build_by_day(fresh_entries),
     )

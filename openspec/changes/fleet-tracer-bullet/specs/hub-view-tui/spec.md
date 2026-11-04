@@ -57,14 +57,26 @@ The view SHALL show the top 8 agent types by invocations over 7 days, summed acr
 - **THEN** the leaderboard shows 10
 
 ### Requirement: Limits shown once per account
-The view SHALL show the 5-hour and 7-day limit bars once per `account`, taken per window from the snapshot with the greatest `limits.captured_at`, annotated with the capture age. A window whose `resets_at` has passed MUST render as `unknown`. An absent window MUST render as `unknown`, not 0 percent. A snapshot whose `limits.captured_at` is more than 5 minutes ahead of the hub clock MUST be ignored for limits, so a future-dated capture cannot win permanently.
+The view SHALL show the 5-hour and 7-day limit bars once per `account`, taken per window from the snapshot with the greatest `limits.captured_at`, annotated with the capture age. Hosts of any status that have a snapshot (fresh or stale) contribute: limits are a property of the account, not of the host, and the capture age plus the `resets_at` rule keep a stale host's capture honest. Hosts that never reported have no snapshot and contribute nothing. A window whose `resets_at` has passed MUST render as `unknown`. An absent window MUST render as `unknown`, not 0 percent. A snapshot whose `limits.captured_at` is more than 5 minutes ahead of the hub clock MUST be ignored for limits, so a future-dated capture cannot win permanently.
 
 #### Scenario: Three hosts, one account
 - **WHEN** three fresh hosts share account `default` and report different `captured_at`
 - **THEN** exactly one 5h bar and one 7d bar are shown, from the latest capture
 
+#### Scenario: Stale host holds the latest capture
+- **WHEN** a stale host's `limits.captured_at` is the greatest for its `account`
+- **THEN** its percentages are shown for that account, annotated with the capture age (for example `as of 3d04h ago` for a capture over a day old), while its row in the hosts table stays grey `unknown` and its numbers stay out of the totals, leaderboard and sparkline
+
+#### Scenario: Stale-only account
+- **WHEN** every host of an `account` is stale
+- **THEN** that account still gets a limits block built from the stale hosts' captures
+
 #### Scenario: Window expired
 - **WHEN** the stored `five_hour.resets_at` is in the past
+- **THEN** the 5h bar renders `unknown`
+
+#### Scenario: Stale host's window expired
+- **WHEN** a stale host holds the greatest capture but its `five_hour.resets_at` is in the past
 - **THEN** the 5h bar renders `unknown`
 
 #### Scenario: No limits anywhere
