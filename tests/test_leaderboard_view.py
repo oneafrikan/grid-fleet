@@ -179,6 +179,24 @@ class TestLeaderboardHostileInput(PanelCase):
         self.put("alpha", agents=make_agents(agent_row("x" * 5000, 5)))
         self.assertEqual(len(self.hubstate().agents[0].type), hub.AGENT_TYPE_MAX)
 
+    def test_long_names_sharing_a_prefix_stay_distinct_rows(self):
+        # QA finding 1: labels used to be cut to 24 chars BEFORE summing, so these 11 types
+        # (same 24-char prefix) silently merged into one row. They aggregate on the full label.
+        names = ["agent-with-a-rather-long-name-%d" % i for i in range(1, 12)]
+        self.assertEqual(len(set(n[:24] for n in names)), 1)  # the premise: one shared prefix
+        self.put("alpha", agents=make_agents(*[agent_row(n, 20 - i) for i, n in enumerate(names)]))
+        self.put("beta", agents=make_agents(agent_row(names[0], 5)))  # sums per FULL name
+        board = self.board()
+        # The top-8 cut applies after aggregation: 8 distinct rows, none merged.
+        self.assertEqual(len(board), 8)
+        self.assertEqual(board[names[0]], 25)
+        self.assertEqual(self.board_order(), names[:8])
+
+    def test_long_name_ties_break_deterministically_on_the_full_label(self):
+        a, b = "x" * 30 + "-b", "x" * 30 + "-a"  # identical first 30 chars
+        self.put("alpha", agents=make_agents(agent_row(a, 3), agent_row(b, 3)))
+        self.assertEqual(self.board_order(), [b, a])
+
     def test_agent_type_that_cleans_to_nothing_is_unknown(self):
         self.put("alpha", agents=make_agents(agent_row("   ", 5)))
         self.assertEqual(self.board(), {"unknown": 5})
@@ -192,12 +210,17 @@ class TestLeaderboardHostileInput(PanelCase):
         rows = [agent_row("t%d" % i, 1) for i in range(hub.MAX_AGENT_ROWS_PER_HOST + 500)]
         self.put("alpha", agents=make_agents(*rows))
         self.assertLessEqual(len(self.hubstate().agents), hub.LEADERBOARD_SIZE)
-        self.assertNotIn("t%d" % (hub.MAX_AGENT_ROWS_PER_HOST + 10), self.board())
 
-
-# ---------------------------------------------------------------------------
-# hub: by_day aggregation
-# ---------------------------------------------------------------------------
+    def test_rows_beyond_the_per_host_cap_are_ignored_even_if_they_would_win(self):
+        # H17. The old check used equal-weight rows, so an uncapped read changed nothing
+        # visible. Here the row just past the cap would outrank everything if it were read.
+        cap = hub.MAX_AGENT_ROWS_PER_HOST
+        rows = [agent_row("t%d" % i, 1) for i in range(cap - 1)]
+        rows.append(agent_row("last-read", 50))        # index cap-1: the last row that counts
+        rows.append(agent_row("beyond-cap", 10 ** 6))  # index cap: must be ignored
+        self.put("alpha", agents=make_agents(*rows))
+        self.assertNotIn("beyond-cap", self.board())
+        self.assertEqual(self.board_order()[0], "last-read")  # the boundary row still counts
 
 
 class TestByDayAggregation(PanelCase):
@@ -257,6 +280,17 @@ class TestByDayAggregation(PanelCase):
         got = self.days()
         self.assertEqual(len(got), 7)
         self.assertEqual(got[-1][0], "2026-10-20")
+
+    def test_by_day_rows_beyond_the_per_host_cap_are_ignored(self):
+        # H18. Rows past MAX_BY_DAY_PER_HOST would win the "latest seven" cut if they were
+        # read, so the surviving days prove the cap (and that the last allowed row counts).
+        cap = hub.MAX_BY_DAY_PER_HOST
+        early = by_day_rows("2026-01-01", [1] * cap)   # the rows that are read
+        late = by_day_rows("2026-10-15", [100] * 7)    # beyond the cap: must be ignored
+        self.put("alpha", tokens=make_tokens(early + late))
+        got = self.days()
+        self.assertEqual([d for d, _ in got], ["2026-01-%02d" % n for n in range(cap - 6, cap + 1)])
+        self.assertTrue(all(o == 1 for _, o in got))
 
     def test_by_day_of_the_wrong_shape_is_ignored(self):
         self.put("alpha", tokens={"last_24h": {}, "last_7d": {}, "by_day": "lots"})
@@ -465,6 +499,43 @@ class TestLeaderboardView(PanelCase):
             texts = self.text(width=w, height=40)
             self.assertTrue(all(len(t) == w for t in texts), w)
             self.assertTrue(any("busy" in t for t in texts))
+
+    def row_with(self, name, width, height=40):
+        """The single rendered line carrying `name` (and nothing else of the panel)."""
+        hits = [t for t in self.text(width=width, height=height) if " %s " % name in t]
+        self.assertEqual(len(hits), 1, hits)
+        return hits[0]
+
+    def test_a_small_non_zero_type_still_gets_a_one_cell_bar(self):
+        # V04. 1 invocation against 1000 scales to 0 cells; the minimum keeps it visible.
+        # Width 70 is below the side-by-side threshold, so only the leaderboard draws bars on
+        # these lines (the sparkline glyphs would otherwise share the same block character).
+        for h in ("alpha", "beta"):
+            self.put(h, agents=NULL)
+        self.put("gamma", agents=make_agents(agent_row("big", 1000), agent_row("tiny", 1)))
+        self.assertEqual(self.row_with("tiny", 70).count("█"), 1)
+        self.assertEqual(self.row_with("big", 70).count("█"), view.BOARD_BAR_MAX)
+
+    def test_output_column_is_dropped_before_it_can_crowd_out_the_bar(self):
+        # V12. At width 72 the right column is 38 cells wide. Long type names (20-cell type
+        # column) leave 7 spare cells: too few for output (7) AND a bar (>= 5), so the dim
+        # output figure goes and the bar stays. Short names leave room for both.
+        for h in ("alpha", "beta"):
+            self.put(h, agents=NULL)
+        long_a, long_b = "long-agent-name-aaaaa", "long-agent-name-bbbbb"
+        self.put("gamma", agents=make_agents(agent_row(long_a, 100, 777000),
+                                             agent_row(long_b, 50, 555000)))
+        texts = self.text(width=72, height=40)
+        self.assertTrue(all(len(t) == 72 for t in texts))  # nothing wider than the terminal
+        row = self.row_with(long_a[:19] + "\u2026", 72)  # the type is clipped with an ellipsis
+        self.assertNotIn("777k", row)
+        self.assertNotIn("777k", "\n".join(texts))
+        self.assertIn("█", row.split("│")[2])  # a bar remains in the leaderboard half
+        # Same width, short names: there IS room, so the output column is shown.
+        self.put("gamma", agents=make_agents(agent_row("short-a", 100, 777000)))
+        texts = self.text(width=72, height=40)
+        self.assertTrue(all(len(t) == 72 for t in texts))
+        self.assertIn("777k", "\n".join(texts))
 
     def test_stale_host_agents_are_not_shown(self):
         self.put("gamma", age_s=41 * 60, agents=make_agents(agent_row("ghost-agent", 500)))

@@ -720,6 +720,22 @@ class TestByDay(CollectBase):
         self.assertEqual(sum(r["output"] for r in t["by_day"]), 1)
         self.assertNotIn("2026-10-14", [r["day"] for r in t["by_day"]])
 
+    def test_future_hour_events_are_excluded_and_by_day_agrees_with_last_7d(self):
+        # An event whose hour bucket is later than "now" (clock skew, or a hand-edited
+        # transcript) is in no window. Without the key <= now_key guard it would land in
+        # today's by_day entry (same UTC date) while last_7d ignores it, so the two disagree.
+        # NOW is 14:03Z on 2026-10-21; +2h is 16:03Z, the same UTC date but a later hour bucket.
+        self.assertEqual(day_of(NOW + 2 * H), day_of(NOW))  # the premise: same UTC day
+        self.session("p", "s1", [ev(60, output=1),
+                                 usage_event(NOW + 2 * H, output=100),    # later hour, same UTC day
+                                 usage_event(NOW + 3 * D, output=1000)])  # beyond today entirely
+        t = self.collect()["tokens"]
+        self.assertEqual(t["by_day"][-1]["day"], day_of(NOW))
+        self.assertEqual(t["by_day"][-1]["output"], 1)
+        self.assertEqual(sum(r["output"] for r in t["by_day"]), 1)
+        self.assertEqual(t["last_7d"]["output"], 1)  # by_day and last_7d agree
+        self.assertEqual(t["last_24h"]["output"], 1)
+
     def test_by_day_warm_run_equals_recount(self):
         path = self.session("p", "s1", [ev(60, output=1), ev(2 * D, output=2)])
         self.collect()
