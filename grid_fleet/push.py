@@ -14,7 +14,8 @@ What `push` does (spec: push-transport; design.md "Hub"):
      never carry old data (design.md "Staleness").
   3. Deliver the snapshot bytes:
        hub == "local" -> atomic write into the local inbox, no ssh.
-       otherwise      -> `ssh -o BatchMode=yes -o ConnectTimeout=10 <alias>
+       otherwise      -> `ssh -o BatchMode=yes -o ConnectTimeout=10
+                         -o ClearAllForwardings=yes -- <alias>
                          "sh -c '<upload script>'"` with the bytes on stdin.
   4. Failure (ssh non-zero, timeout, cannot spawn): exit EXIT_FAILED, keep the
      local snapshot, ONE short stderr line, no retry loop. The next timer tick
@@ -100,8 +101,12 @@ UPLOAD_SCRIPT = (
     'mv "$t" "$d/@HOST@.json"'
 )
 
-# Whitespace or ASCII control chars (incl. DEL) anywhere in the alias.
-_BAD_ALIAS_CHARS = re.compile(r"[\s\x00-\x1f\x7f]")
+# The conservative alias charset: letters, digits and . _ @ : - . That covers a config
+# alias, `user@host`, a dotted host name, an IPv4 address and an unbracketed IPv6 one;
+# it excludes whitespace, control characters, quotes, `%`, `/`, `$`, `;` and every
+# other shell or ssh-token metacharacter (ProxyCommand-style `%h` expansion, etc.).
+# Matched with fullmatch: a `$` anchor would let a trailing "\n" through.
+_ALIAS_CHARS = re.compile(r"[A-Za-z0-9._@:-]+")
 
 
 class PushError(Exception):
@@ -111,16 +116,18 @@ class PushError(Exception):
 def validate_hub(hub_value: object) -> Optional[str]:
     """Return None if `hub_value` is a usable ssh alias (or "local"), else the reason.
 
-    The alias is passed to ssh as a bare argv word, so a leading "-" would be
-    parsed by ssh as an option (e.g. -oProxyCommand=...). Whitespace/control
-    characters have no place in a host alias either.
+    The alias is passed to ssh as a bare argv word. A leading "-" would be parsed by
+    ssh as an option (e.g. -oProxyCommand=...); deliver_ssh also puts `--` before it,
+    but the check stays so the failure is a clear config error. The rest of the value
+    is held to a conservative charset (_ALIAS_CHARS) so no metacharacter can reach ssh
+    or a user's `%h`-expanding ssh_config entry.
     """
     if not isinstance(hub_value, str) or not hub_value:
         return "must be a non-empty ssh host alias or \"local\""
     if hub_value.startswith("-"):
         return "must not start with \"-\" (ssh would read it as an option)"
-    if _BAD_ALIAS_CHARS.search(hub_value):
-        return "must not contain whitespace or control characters"
+    if not _ALIAS_CHARS.fullmatch(hub_value):
+        return "may only contain letters, digits and . _ @ : -"
     return None
 
 
@@ -215,6 +222,9 @@ def deliver_ssh(config, data: bytes) -> None:
         "ssh",  # resolved via PATH; tests put a fake first
         "-o", "BatchMode=yes",  # never prompt (passphrase, host key, password)
         "-o", "ConnectTimeout=10",  # never hang on an unreachable hub
+        # One-shot upload: never open port/agent/X11 forwards a user's ssh config asks for.
+        "-o", "ClearAllForwardings=yes",
+        "--",  # end of options: the alias can never be parsed as one, whatever it holds
         config.hub,
         remote_command(config.host_name),
     ]

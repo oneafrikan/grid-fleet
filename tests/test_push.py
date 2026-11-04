@@ -124,10 +124,15 @@ class TestPushOverSsh(PushBase):
         self.store_snapshot()
         self.run_push()
         (argv,) = self.ssh.calls()
-        # Exact shape: options, alias, ONE remote-command word.
-        self.assertEqual(argv[:4], ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10"])
-        self.assertEqual(argv[4], ALIAS)
-        self.assertEqual(len(argv), 6)
+        # Exact shape: options, "--", alias, ONE remote-command word. ClearAllForwardings
+        # stops a user's ssh config from opening port/agent/X11 forwards for this one-shot
+        # upload; "--" means the alias can never be parsed as an option.
+        self.assertEqual(argv[:6], ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
+                                    "-o", "ClearAllForwardings=yes"])
+        self.assertEqual(argv[6], "--")
+        self.assertEqual(argv[7], ALIAS)
+        self.assertEqual(len(argv), 9)
+        argv = argv[:5] + [argv[8]]  # the checks below index the remote-command word as argv[5]
         self.assertTrue(argv[5].startswith("sh -c '"))
         self.assertTrue(argv[5].endswith("'"))
         self.assertNotIn("\n", argv[5])
@@ -192,7 +197,9 @@ class TestPushOverSsh(PushBase):
     def test_ssh_timeout_is_a_failure_not_a_hang(self):
         data = self.store_snapshot()
         self.ssh.set_mode("hang")
-        with mock.patch.object(push, "SSH_TIMEOUT_S", 1):
+        # 3 s, not 1: under load the fake ssh script can need >1 s just to start and record its
+        # argv, which made `calls()` empty and the test flaky.
+        with mock.patch.object(push, "SSH_TIMEOUT_S", 3):
             rc, _, err = self.run_push()
         self.assertNotEqual(rc, 0)
         self.assertIn("timeout", err)
@@ -240,7 +247,10 @@ class TestHubNotConfigured(PushBase):
 
     def test_hostile_hub_aliases_are_refused(self):
         # Option injection into ssh, and whitespace/control characters.
-        for bad in ("-oProxyCommand=touch /nope", "-J", "", "a b", "a\tb", "a\nb", "a\x00b", " hub", "hub "):
+        for bad in ("-oProxyCommand=touch /nope", "-J", "", "a b", "a\tb", "a\nb", "a\x00b", " hub", "hub ", "hub\n",
+                    # S6: outside the conservative charset [A-Za-z0-9._@:-]
+                    "a;b", "a'b", 'a"b', "a$(id)", "a`id`", "a|b", "a&b", "a/b", "a\\b", "a%h",
+                    "a=b", "a,b", "a*", "~", "h\u00e9", "a\x7fb", "-", "--", "-x"):
             config = dataclasses.replace(self.config, hub=bad)
             rc, _, err = self.run_push(config)
             self.assertNotEqual(rc, 0, repr(bad))
@@ -249,7 +259,8 @@ class TestHubNotConfigured(PushBase):
             self.assert_nothing_ran()
 
     def test_plain_aliases_are_accepted(self):
-        for ok in ("hub-alias", "user@host.example", "h_1", "local"):
+        for ok in ("hub-alias", "user@host.example", "h_1", "local", "a.b.example", "10.0.0.5",
+                   "fe80::1", "User_1@host-2.example", "a-", "x"):
             self.assertIsNone(push.validate_hub(ok), ok)
 
 
