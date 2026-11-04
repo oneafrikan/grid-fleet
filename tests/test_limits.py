@@ -12,10 +12,12 @@ import hashlib
 import json
 import os
 import shutil
+import signal
 import stat
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 from helpers.claude_tree import SYNTH_CWD, SYNTH_SESSION_NAME
@@ -343,6 +345,61 @@ class TestSliceCapture(TapBase):
         self.assertEqual(self.state_listing(), ["limits.json"])
 
 
+class TestOrderingAndSignals(TapBase):
+    """F5a/F5c: pin behaviours a mutant could silently flip."""
+
+    def test_capture_happens_before_the_original_runs(self):
+        # The original reads limits.json while it runs and prints it. If capture were moved
+        # after the original (or skipped), it would see no file here.
+        reader = os.path.join(self.work, "reader.py")
+        with open(reader, "w") as fh:
+            fh.write("import os, sys\n"
+                     "sys.stdin.buffer.read()\n"
+                     "p = os.environ['LIMITS_PATH']\n"
+                     "sys.stdout.write(open(p).read() if os.path.exists(p) else 'NO-FILE')\n")
+        r = self.tap(payload(five=(42.0, NOW + 100)),
+                     command=[sys.executable, reader], env=self.env(LIMITS_PATH=self.limits_file))
+        self.assertEqual(r.returncode, 0)
+        self.assertNotEqual(r.stdout, b"NO-FILE")
+        self.assertEqual(json.loads(r.stdout.decode())["five_hour"]["used_pct"], 42.0)
+
+    def test_capture_survives_a_hung_original_that_is_killed(self):
+        # Same property, other angle: the original never returns and the tap is killed
+        # mid-run (Claude Code abandoning a slow statusLine). The slice must already be on disk.
+        # stdin comes from a file and stdout/stderr go to /dev/null: the orphaned original
+        # (it sleeps a few seconds, then exits by itself) must not hold a pipe we wait on.
+        stdin_file = os.path.join(self.work, "stdin.json")
+        with open(stdin_file, "wb") as fh:
+            fh.write(payload(five=(7.0, NOW + 100)))
+        # The original drops a marker the moment it starts, then hangs. We wait for the
+        # MARKER (not the limits file): once the original is running, capture-before-original
+        # means the file must already exist; capture-after-original would still be waiting.
+        marker = os.path.join(self.work, "original-started")
+        hang = "import sys, time; open(sys.argv[1], 'w').close(); time.sleep(5)"
+        with open(stdin_file, "rb") as stdin:
+            proc = subprocess.Popen(
+                [sys.executable, BIN, "tap", "--", sys.executable, "-c", hang, marker],
+                stdin=stdin, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                env=self.env(), cwd=self.work)
+        self.addCleanup(proc.wait)
+        deadline = time.time() + 10
+        while not os.path.exists(marker) and time.time() < deadline:
+            time.sleep(0.02)
+        proc.kill()
+        proc.wait()
+        self.assertTrue(os.path.exists(marker), "original never started")
+        self.assertEqual(self.read()["five_hour"]["used_pct"], 7.0)
+
+    def test_signal_killed_original_maps_to_128_plus_signal(self):
+        # subprocess reports a signal death as returncode -N; the tap reports it the way a
+        # shell would (128 + N). Pinned for SIGTERM and SIGKILL.
+        for sig in (signal.SIGTERM, signal.SIGKILL):
+            r = self.tap(payload(), command=[sys.executable, "-c",
+                                             "import os; os.kill(os.getpid(), %d)" % sig])
+            self.assertEqual(r.returncode, 128 + sig, sig)
+            self.assertEqual(r.stdout, b"")
+
+
 class TestHostileNumbers(TapBase):
     """F2: a value too big for a float must read as "not a number", never raise.
 
@@ -433,6 +490,36 @@ class TestReader(TapBase):
     def test_absent_file_is_none(self):
         self.assertIsNone(limits.read_limits(self.config()))
 
+    def test_nan_and_infinity_tokens_are_rejected(self):
+        # F5b: json.load accepts the non-standard tokens NaN / Infinity / -Infinity. They
+        # must read as "not a number" (math.isfinite), or a NaN would reach the snapshot.
+        os.makedirs(self.state)
+        good_win = '{"used_pct": 1, "resets_at": %d}' % (NOW + 9)
+        for token in ("NaN", "Infinity", "-Infinity"):
+            cases = {
+                # captured_at bad -> whole file unusable
+                '{"schema":1,"captured_at":%s,"five_hour":%s}' % (token, good_win): None,
+                # used_pct bad -> window dropped, the other kept
+                '{"schema":1,"captured_at":%d,"five_hour":{"used_pct":%s,"resets_at":%d},"seven_day":%s}'
+                % (NOW, token, NOW + 9, good_win):
+                    {"captured_at": NOW, "seven_day": {"used_pct": 1, "resets_at": NOW + 9}},
+                # resets_at bad -> window dropped
+                '{"schema":1,"captured_at":%d,"seven_day":{"used_pct":1,"resets_at":%s},"five_hour":%s}'
+                % (NOW, token, good_win):
+                    {"captured_at": NOW, "five_hour": {"used_pct": 1, "resets_at": NOW + 9}},
+            }
+            for text, expected in cases.items():
+                with open(self.limits_file, "w") as fh:
+                    fh.write(text)
+                self.assertEqual(limits.read_limits(self.config()), expected, text)
+
+    def test_nan_in_the_payload_is_rejected(self):
+        # Same check on the tap side: the payload is JSON text containing a bare NaN token.
+        data = (b'{"rate_limits":{"five_hour":{"used_percentage":NaN,"resets_at":%d},'
+                b'"seven_day":{"used_percentage":3,"resets_at":%d}}}' % (NOW + 9, NOW + 9))
+        self.tap(data)
+        self.assertEqual(set(self.read()), {"schema", "captured_at", "seven_day"})
+
     def test_default_config_without_state_dir_uses_environment(self):
         # cli falls back to Config() when config.json is broken; state_dir is then "".
         from grid_fleet import config as cfg
@@ -461,15 +548,47 @@ class TestNoCredentialsNoNetwork(unittest.TestCase):
     # Substrings no literal in the module may contain (docstrings excluded; the module
     # doc legitimately talks about privacy).
     FORBIDDEN_LITERALS = ("credential", "keychain", "oauth", "anthropic", "http", ".claude",
-                          "settings.json", "token", "security")
+                          "settings.json", "token", "security", "curl", "wget")
+
+    # Every file that runs on the tap's path is audited, not just limits.py.
+    AUDITED = [LIMITS_SRC]
+
+    # subprocess entry points whose first argument is the command to run.
+    SUBPROCESS_FUNCS = {"run", "call", "check_call", "check_output", "Popen", "getoutput", "getstatusoutput"}
 
     def setUp(self):
-        with open(LIMITS_SRC) as fh:
-            self.tree = ast.parse(fh.read())
+        self.trees = []
+        for path in self.AUDITED:
+            with open(path) as fh:
+                self.trees.append((path, ast.parse(fh.read())))
 
-    def _imports(self):
+    @classmethod
+    def hardcoded_subprocess_calls(cls, tree):
+        """Lines of subprocess calls whose command is anything but a plain variable.
+
+        The tap may run exactly one command: the user's original statusLine, passed in as a
+        variable. A literal command (["curl", ...], "curl ...") or shell=True is a violation.
+        """
+        bad = []
+        for n in ast.walk(tree):
+            if not isinstance(n, ast.Call):
+                continue
+            f = n.func
+            is_subprocess = (isinstance(f, ast.Attribute) and f.attr in cls.SUBPROCESS_FUNCS
+                             and isinstance(f.value, ast.Name) and f.value.id == "subprocess")
+            if not is_subprocess:
+                continue
+            command = n.args[0] if n.args else next((k.value for k in n.keywords if k.arg == "args"), None)
+            shell_true = any(k.arg == "shell" and not (isinstance(k.value, ast.Constant) and k.value.value is False)
+                             for k in n.keywords)
+            if not isinstance(command, ast.Name) or shell_true:
+                bad.append(n.lineno)
+        return bad
+
+    @staticmethod
+    def _imports(tree):
         names = set()
-        for n in ast.walk(self.tree):
+        for n in ast.walk(tree):
             if isinstance(n, ast.Import):
                 names.update(a.name for a in n.names)
             elif isinstance(n, ast.ImportFrom):
@@ -478,40 +597,62 @@ class TestNoCredentialsNoNetwork(unittest.TestCase):
                 names.update(base + "." + a.name for a in n.names)
         return names
 
+    def test_audited_files_exist_and_are_parsed(self):
+        self.assertEqual(len(self.trees), len(self.AUDITED))
+        self.assertIn(LIMITS_SRC, [p for p, _t in self.trees])
+
     def test_no_network_or_credential_imports(self):
-        for name in self._imports():
-            top = name.split(".")[0]
-            self.assertNotIn(top, self.FORBIDDEN_MODULES, name)
-            self.assertNotIn(name, self.FORBIDDEN_MODULES, name)
+        for path, tree in self.trees:
+            for name in self._imports(tree):
+                top = name.split(".")[0]
+                self.assertNotIn(top, self.FORBIDDEN_MODULES, "%s: %s" % (path, name))
+                self.assertNotIn(name, self.FORBIDDEN_MODULES, "%s: %s" % (path, name))
 
     def test_no_network_or_credential_calls(self):
-        for n in ast.walk(self.tree):
-            if isinstance(n, ast.Call):
-                f = n.func
-                name = f.attr if isinstance(f, ast.Attribute) else getattr(f, "id", "")
-                self.assertNotIn(name, self.FORBIDDEN_CALLS, "line %d" % n.lineno)
+        for path, tree in self.trees:
+            for n in ast.walk(tree):
+                if isinstance(n, ast.Call):
+                    f = n.func
+                    name = f.attr if isinstance(f, ast.Attribute) else getattr(f, "id", "")
+                    self.assertNotIn(name, self.FORBIDDEN_CALLS, "%s line %d" % (path, n.lineno))
+
+    def test_only_the_variable_original_command_is_ever_spawned(self):
+        # X7: a literal command list passed to subprocess slipped past the name-based audit.
+        for path, tree in self.trees:
+            self.assertEqual(self.hardcoded_subprocess_calls(tree), [], path)
 
     def test_no_credential_paths_or_endpoints_in_literals(self):
-        docstrings = set()
-        for n in ast.walk(self.tree):
-            if isinstance(n, (ast.Module, ast.FunctionDef, ast.ClassDef)):
-                body = n.body
-                if body and isinstance(body[0], ast.Expr) and isinstance(getattr(body[0], "value", None), ast.Constant):
-                    docstrings.add(id(body[0].value))
-        for n in ast.walk(self.tree):
-            if isinstance(n, ast.Constant) and isinstance(n.value, str) and id(n) not in docstrings:
-                low = n.value.lower()
-                for bad in self.FORBIDDEN_LITERALS:
-                    self.assertNotIn(bad, low, "literal %r at line %d" % (n.value, n.lineno))
+        for path, tree in self.trees:
+            docstrings = set()
+            for n in ast.walk(tree):
+                if isinstance(n, (ast.Module, ast.FunctionDef, ast.ClassDef)):
+                    body = n.body
+                    if body and isinstance(body[0], ast.Expr) and isinstance(getattr(body[0], "value", None), ast.Constant):
+                        docstrings.add(id(body[0].value))
+            for n in ast.walk(tree):
+                if isinstance(n, ast.Constant) and isinstance(n.value, str) and id(n) not in docstrings:
+                    low = n.value.lower()
+                    for bad in self.FORBIDDEN_LITERALS:
+                        self.assertNotIn(bad, low, "%s: literal %r at line %d" % (path, n.value, n.lineno))
 
     def test_audit_catches_a_violation(self):
         # Self-test of the audit so it cannot pass vacuously.
         tree = ast.parse("import socket\nimport urllib.request\nx = urllib.request.urlopen('u')")
-        names = set()
-        for n in ast.walk(tree):
-            if isinstance(n, ast.Import):
-                names.update(a.name.split(".")[0] for a in n.names)
-        self.assertTrue(names & self.FORBIDDEN_MODULES)
+        self.assertTrue({n.split(".")[0] for n in self._imports(tree)} & self.FORBIDDEN_MODULES)
+
+    def test_audit_catches_hardcoded_subprocess_commands(self):
+        flagged = [
+            "import subprocess\nsubprocess.run(['curl', 'x'])",
+            "import subprocess\nsubprocess.run(args=['curl', 'x'])",
+            "import subprocess\nsubprocess.check_output(('curl', 'x'))",
+            "import subprocess\nsubprocess.run('curl x', shell=True)",
+            "import subprocess\nsubprocess.run(command, shell=True)",
+            "import subprocess\nsubprocess.Popen(['a'] + command)",
+        ]
+        for src in flagged:
+            self.assertTrue(self.hardcoded_subprocess_calls(ast.parse(src)), src)
+        self.assertEqual(self.hardcoded_subprocess_calls(
+            ast.parse("import subprocess\nsubprocess.run(command, input=data, stdout=subprocess.PIPE)")), [])
 
     def test_tap_never_opens_a_socket_at_runtime(self):
         # Dynamic backstop (in-process): any socket connect during capture would raise.
