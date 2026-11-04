@@ -17,8 +17,9 @@ snapshot is older than interval_s; design.md "Staleness"):
         collect + write_snapshot; returns the snapshot. Raises OSError on write failure.
     snapshot_path(config) -> str
 
-Sections owned by later groups stay None here: `agents` (group 6 leaderboard)
-and `limits` (group 7 tap). `tokens.by_day` is filled now because it falls out
+`agents` (group 6 leaderboard) is owned by a later group and stays None here.
+`limits` is read from the local limits.json the statusLine tap writes (None when
+never captured). `tokens.by_day` is filled now because it falls out
 of the same hourly buckets.
 
 Privacy: nothing in the snapshot, the one-line summary or any warning comes
@@ -31,6 +32,7 @@ import sys
 from typing import Callable, List
 
 from grid_fleet import config as cfg
+from grid_fleet import limits as limits_mod
 from grid_fleet import sources_claude
 
 SCHEMA = 1
@@ -83,7 +85,8 @@ def collect(config, opener: Callable = open) -> dict:
         "sessions": sessions,
         "tokens": tokens,
         "agents": None,  # group 6
-        "limits": None,  # group 7
+        # Copied from the tap's limits.json; None if absent or invalid (never zeros).
+        "limits": limits_mod.read_limits(config),
         "warnings": warnings,
     }
 

@@ -1,4 +1,4 @@
-"""cli.py: --version, every subcommand reachable and (for now) a stub, no-args behaviour."""
+"""cli.py: --version, every subcommand reachable (install is the last stub), no-args behaviour."""
 
 import contextlib
 import io
@@ -54,10 +54,12 @@ class TestCli(CliCase):
             self.assertEqual(rc, 2, name)
             self.assertIn("not implemented", err, name)
 
-    def test_tap_stub_with_command(self):
-        rc, _, err = self.run_cli(["tap", "--", "echo", "--flag", "x"])
-        self.assertEqual(rc, 2)
-        self.assertIn("not implemented", err)
+    def test_tap_is_real_not_a_stub(self):
+        # tap with no original command prints nothing and exits 0 (limits-capture spec).
+        # Stdin is an empty in-memory buffer so the test never blocks on a terminal.
+        with mock.patch("sys.stdin", io.TextIOWrapper(io.BytesIO(b""))):
+            rc, out, _ = self.run_cli(["tap"])
+        self.assertEqual((rc, out), (0, ""))
 
     def test_tap_command_split_verbatim(self):
         # The wrapped command (including its own flags) must reach tap_main untouched.
@@ -123,10 +125,11 @@ class TestCli(CliCase):
             rc, _, err = self.run_cli([name])
             self.assertEqual(rc, cli.EXIT_CONFIG, name)
             self.assertIn("config error", err)
-        # tap must survive a broken config (reaches the stub, exit 2)
-        rc, _, err = self.run_cli(["tap", "--", "true"])
-        self.assertEqual(rc, 2)
-        self.assertIn("not implemented", err)
+        # tap must survive a broken config: it falls back to defaults and runs
+        # (no original command here, so it exits 0 and prints nothing).
+        with mock.patch("sys.stdin", io.TextIOWrapper(io.BytesIO(b""))):
+            rc, out, err = self.run_cli(["tap"])
+        self.assertEqual((rc, out, err), (0, "", ""))
 
 
 class TestEntryScript(CliCase):
