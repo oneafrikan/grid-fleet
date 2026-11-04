@@ -1,7 +1,8 @@
 """Tests for `collect` (Group 2): sessions, token totals, incremental scan, fail-soft, privacy.
 
 Scenario names follow openspec/changes/fleet-tracer-bullet/specs/snapshot-collect/spec.md.
-NOT covered here on purpose (other groups): Subagent leaderboard (`agents` section) and limits.
+NOT covered here on purpose (other groups): limits. The `agents` leaderboard and `tokens.by_day`
+(Group 6, collect side) are covered by TestAgentsLeaderboard and TestByDay below.
 
 Everything runs against a synthetic Claude tree and a fake `claude` executable in temp
 dirs, with GRID_FLEET_* overrides and a fixed clock. No test reads the real ~/.claude.
@@ -151,7 +152,10 @@ class TestSnapshotContent(CollectBase):
         self.assertEqual(snap["warnings"], [])
         self.assertIn("agents", snap)
         self.assertIn("limits", snap)
-        self.assertIsNone(snap["agents"])  # group 6
+        self.assertEqual(snap["agents"], {"last_7d": [
+            {"type": "main", "invocations": 1, "output": 100},  # tie on invocations: output desc
+            {"type": "core-researcher", "invocations": 1, "output": 50},
+        ]})
         self.assertIsNone(snap["limits"])  # group 7
 
     def test_section_unavailable_projects_dir_missing(self):
@@ -171,12 +175,14 @@ class TestSnapshotContent(CollectBase):
         self.tree.set_agents([agent_row(status="busy")])
         snap = self.collect()
         self.assertIsNone(snap["tokens"])
+        self.assertIsNone(snap["agents"])  # null together with tokens, never an empty list
         self.assertTrue(any("no transcripts" in w for w in snap["warnings"]))
 
     def test_idle_host_with_no_transcripts_reports_zeros(self):
         snap = self.collect()
         self.assertEqual(snap["tokens"]["last_7d"]["output"], 0)
         self.assertEqual(len(snap["tokens"]["by_day"]), 7)
+        self.assertEqual(snap["agents"], {"last_7d": []})  # collected, nobody invoked: empty, not null
 
     def test_host_name_is_safe_for_use_as_a_file_name(self):
         # Scenario: Host name is safe (via config file, and via a hand-built Config)
@@ -402,6 +408,318 @@ class TestTokenTotals(CollectBase):
         path = self.session("proj-a", "old", [ev(60, output=500)])
         self.tree.set_mtime(path, NOW - 9 * D)
         self.assertEqual(self.collect()["tokens"]["last_24h"]["output"], 0)
+
+
+def pin_tz(testcase, zone):
+    """Run the rest of `testcase` with the process zone set to `zone`, restoring it afterwards.
+
+    Used to prove day/hour bucketing is UTC on any host: with a UTC host zone a local-time bug
+    would go unnoticed.
+    """
+    old = os.environ.get("TZ")
+
+    def restore():
+        if old is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = old
+        time.tzset()
+
+    testcase.addCleanup(restore)
+    os.environ["TZ"] = zone
+    time.tzset()
+
+
+def labels(snap):
+    """{type: (invocations, output)} from a snapshot's leaderboard."""
+    return {r["type"]: (r["invocations"], r["output"]) for r in snap["agents"]["last_7d"]}
+
+
+# Label rule from sources_claude._sanitize_label: printable ASCII subset, 1..64 chars.
+SAFE_LABEL = re.compile(r"^[A-Za-z0-9._:-]{1,64}$")
+
+
+class TestAgentsLeaderboard(CollectBase):
+    """Scenarios under 'Subagent leaderboard' (spec: snapshot-collect) plus the hostile-meta cases."""
+
+    def setUp(self):
+        super().setUp()
+        pin_tz(self, "America/Los_Angeles")
+        self._n = 0
+
+    @staticmethod
+    def meta_path(transcript):
+        return transcript[: -len(".jsonl")] + ".meta.json"
+
+    def hostile(self, raw_bytes, output=1):
+        """Add a subagent (own session, so every call is independent) whose meta file is exactly
+        `raw_bytes`; returns the transcript path."""
+        self._n += 1
+        path = self.subagent("p", "hs%d" % self._n, "h%d" % self._n, None, [ev(60, output=output)], meta=False)
+        with open(self.meta_path(path), "wb") as fh:
+            fh.write(raw_bytes)
+        return path
+
+    def test_main_counts_as_an_agent(self):
+        # Scenario: Main counts as an agent
+        self.session("proj-a", "s1", [ev(60, output=10)])
+        self.session("proj-a", "s2", [ev(60, output=20)])
+        self.subagent("proj-a", "s1", "a1", "core-researcher", [ev(30, output=5)])
+        agents = self.collect()["agents"]
+        self.assertEqual(agents, {"last_7d": [
+            {"type": "main", "invocations": 2, "output": 30},
+            {"type": "core-researcher", "invocations": 1, "output": 5},
+        ]})
+
+    def test_sorted_by_invocations_descending(self):
+        # Scenario: Sorted output
+        self.session("p", "s1", [ev(60, output=1)])
+        for i in range(3):
+            self.subagent("p", "s1", "r%d" % i, "core-researcher", [ev(60, output=1)])
+        for i in range(2):
+            self.subagent("p", "s1", "b%d" % i, "grid-backend-dev", [ev(60, output=1)])
+        types = [r["type"] for r in self.collect()["agents"]["last_7d"]]
+        self.assertEqual(types, ["core-researcher", "grid-backend-dev", "main"])
+
+    def test_ties_break_by_output_then_type_and_are_stable(self):
+        # The spec has no tie-break; ours is output desc, then type asc, so runs are deterministic.
+        self.subagent("p", "s1", "a", "zeta", [ev(60, output=5)])
+        self.subagent("p", "s1", "b", "alpha", [ev(60, output=5)])
+        self.subagent("p", "s1", "c", "mid", [ev(60, output=9)])
+        first = self.collect()["agents"]["last_7d"]
+        self.assertEqual([r["type"] for r in first], ["mid", "alpha", "zeta"])
+        self.assertEqual(self.collect()["agents"]["last_7d"], first)
+
+    def test_meta_file_missing_is_reported_as_unknown(self):
+        # Scenario: Meta file missing
+        self.subagent("p", "s1", "a1", None, [ev(60, output=7)], meta=False)
+        self.assertEqual(labels(self.collect()), {"unknown": (1, 7)})
+
+    def test_invocations_are_transcripts_not_events(self):
+        # Design: one transcript with many usage events is one invocation.
+        self.subagent("p", "s1", "a1", "core-researcher", [ev(60 * i, output=1) for i in range(1, 6)])
+        self.assertEqual(labels(self.collect()), {"core-researcher": (1, 5)})
+
+    def test_transcript_without_usage_in_window_is_not_an_invocation(self):
+        self.subagent("p", "s1", "none", "core-researcher", [user_event(NOW - 60)])  # no usage line at all
+        self.subagent("p", "s1", "old", "core-researcher", [ev(int(7.5 * D), output=99)])  # outside 7d
+        self.assertEqual(self.collect()["agents"], {"last_7d": []})
+
+    def test_cross_window_only_in_window_output_counts(self):
+        # A transcript straddling the window edge is ONE invocation with only its in-window output.
+        oldest_start_age = 167 * H + (NOW % H)  # age of the first second of the oldest 7d bucket
+        self.subagent("p", "s1", "edge", "core-researcher", [
+            ev(oldest_start_age, output=1),       # in
+            ev(oldest_start_age + 1, output=10),  # one second too old: out
+            ev(int(7.5 * D), output=100),         # out
+        ])
+        self.subagent("p", "s1", "gone", "core-researcher", [ev(oldest_start_age + 1, output=1000)])  # all out
+        self.assertEqual(labels(self.collect()), {"core-researcher": (1, 1)})
+
+    def test_leaderboard_output_sums_to_last_7d_tokens(self):
+        # Invariant: both come from the same buckets, so total output must agree.
+        self.session("p", "s1", [ev(60, output=100), ev(3 * D, output=40), ev(7 * D + H, output=9)])
+        self.subagent("p", "s1", "a1", "core-researcher", [ev(2 * H, output=11)])
+        self.subagent("p", "s1", "a2", None, [ev(5 * D, output=3)], meta=False)
+        snap = self.collect()
+        self.assertEqual(sum(r["output"] for r in snap["agents"]["last_7d"]), snap["tokens"]["last_7d"]["output"])
+
+    def test_deleted_transcript_counts_until_it_ages_out(self):
+        path = self.subagent("p", "s1", "a1", "core-researcher", [ev(2 * D, output=30)])
+        self.assertEqual(labels(self.collect()), {"core-researcher": (1, 30)})
+        os.remove(path)
+        os.remove(self.meta_path(path))
+        self.assertEqual(labels(self.collect()), {"core-researcher": (1, 30)})
+        with mock.patch.dict(os.environ, {"GRID_FLEET_NOW": str(NOW + 9 * D)}):
+            self.assertEqual(self.collect()["agents"], {"last_7d": []})
+
+    def test_warm_run_reads_only_appended_bytes_and_matches_a_recount(self):
+        main = self.session("p", "s1", [ev(600, output=10) for _ in range(5)])
+        sub = self.subagent("p", "s1", "a1", "core-researcher", [ev(600, output=3) for _ in range(5)])
+        self.collect()
+        appended = [ev(60, output=2) for _ in range(40)]
+        self.tree.append_events(sub, appended)
+        new_bytes = sum(len(json.dumps(e)) + 1 for e in appended)
+        counter = CountingOpener()
+        warm = self.collect(opener=counter)
+        self.assertEqual(counter.bytes_read.get(sub), new_bytes)  # only the appended bytes
+        self.assertNotIn(main, counter.opened)  # unchanged transcript: not opened
+        # The meta file is read once, when the entry is created, never on a warm run.
+        self.assertFalse([p for p in counter.opened if p.endswith(".meta.json")])
+        fresh = self.make_config(state=os.path.join(self.work, "fresh-state"))
+        self.assertEqual(warm["agents"], self.collect(fresh)["agents"])
+        self.assertEqual(labels(warm), {"main": (1, 50), "core-researcher": (1, 15 + 80)})
+
+    def test_new_transcript_between_runs_adds_an_invocation(self):
+        self.session("p", "s1", [ev(60, output=1)])
+        self.assertEqual(labels(self.collect()), {"main": (1, 1)})
+        self.subagent("p", "s1", "a1", "core-researcher", [ev(30, output=2)])
+        self.assertEqual(labels(self.collect()), {"main": (1, 1), "core-researcher": (1, 2)})
+
+    def test_late_meta_file_moves_invocation_out_of_unknown(self):
+        path = self.subagent("p", "s1", "a1", None, [ev(60, output=4)], meta=False)
+        self.assertEqual(labels(self.collect()), {"unknown": (1, 4)})
+        with open(self.meta_path(path), "w") as fh:
+            json.dump({"agentType": "core-researcher"}, fh)
+        self.assertEqual(labels(self.collect()), {"core-researcher": (1, 4)})
+
+    def test_old_offsets_cache_without_needed_fields_is_rebuilt_not_trusted(self):
+        # The leaderboard needs no new cache field (it reads `agent` + `hours`, both in schema 1
+        # since Group 2). A cache missing them must rebuild, never crash or miscount.
+        self.session("p", "s1", [ev(60, output=10)])
+        self.subagent("p", "s1", "a1", "core-researcher", [ev(30, output=5)])
+        want = self.collect()["agents"]
+        old_shapes = [
+            {"offset": 5, "size": 5, "hours": {"2026-10-21T14": [1, 0, 0, 0]}},                 # no agent
+            {"offset": 5, "size": 5, "agent": "main"},                                           # no hours
+            {"offset": 5, "size": 5, "agent": "main", "hours": {"2026-10-21T14": [1, 0, 0]}},    # short vector
+        ]
+        for i, ent in enumerate(old_shapes):
+            with self.subTest(shape=i):
+                with open(os.path.join(self.state, "offsets.json"), "w") as fh:
+                    json.dump({"schema": 1, "files": {"p/s1.jsonl": ent}}, fh)
+                self.assertEqual(self.collect()["agents"], want)  # rebuilt: correct counts
+                self.assertEqual(self.offsets()["schema"], 1)
+
+    def test_agents_null_with_tokens_when_projects_dir_missing(self):
+        shutil.rmtree(self.tree.projects_dir)
+        snap = self.collect()
+        self.assertIsNone(snap["agents"])
+        self.assertIsNone(snap["tokens"])
+
+    # -- privacy ------------------------------------------------------------
+
+    def test_decoy_names_never_reach_the_agents_section(self):
+        # Types come from meta `agentType` only. Project dir, session id and agent id decoys,
+        # and extra identifying meta fields, must not appear anywhere in the snapshot.
+        proj, sid, aid = "decoyproj-dirname-q1", "decoy-session-id-9", "decoyagent77"
+        self.session(proj, sid, [ev(60, output=1, session_id=sid)])
+        self.subagent(proj, sid, aid, None, [ev(30, output=2, session_id=sid)],
+                      meta={"agentType": "core-researcher", "cwd": SYNTH_CWD,
+                            "name": SYNTH_SESSION_NAME, "description": SYNTH_TEXT, "sessionId": sid})
+        self.subagent(proj, sid, "decoyagent78", None, [ev(30, output=2)], meta=False)
+        snap = self.collect()
+        text = json.dumps(snap)
+        for s in (proj, sid, aid, "decoyagent78", SYNTH_CWD, SYNTH_SESSION_NAME, SYNTH_TEXT):
+            self.assertNotIn(s, text)
+        self.assertEqual({r["type"] for r in snap["agents"]["last_7d"]}, {"main", "core-researcher", "unknown"})
+
+    def test_agent_labels_come_only_from_agenttype(self):
+        # A meta without agentType but with other string fields must not borrow any of them.
+        self.subagent("p", "s1", "a1", None, [ev(60, output=1)], meta={"name": "leaky-name", "type": "leaky"})
+        self.assertEqual(labels(self.collect()), {"unknown": (1, 1)})
+
+    # -- hostile meta files -------------------------------------------------
+
+    def test_non_json_wrong_type_and_empty_meta_become_unknown(self):
+        bodies = [b"", b"not json {{{", b"\xff\xfe\x00garbage", b"null", b"[]", b"42", b"true", b'"str"',
+                  b'{"agentType": 7}', b'{"agentType": null}', b'{"agentType": ["a"]}',
+                  b'{"agentType": {"x": 1}}', b'{"agentType": ""}', b'{"agentType": true}',
+                  b"[" * 100000]  # nesting bomb: must not crash with RecursionError
+        for body in bodies:
+            self.hostile(body)
+        self.assertEqual(labels(self.collect()), {"unknown": (len(bodies), len(bodies))})
+
+    def test_huge_agenttype_is_truncated_to_64_chars(self):
+        self.hostile(json.dumps({"agentType": "a" * 5000}).encode())
+        self.assertEqual(labels(self.collect()), {"a" * 64: (1, 1)})
+
+    def test_oversized_meta_file_is_not_read_in_full(self):
+        # A hostile multi-MB "meta" file: bounded read, reported as unknown.
+        path = self.hostile(json.dumps({"agentType": "core-researcher", "pad": "x" * (2 * 1024 * 1024)}).encode())
+        counter = CountingOpener()
+        snap = self.collect(opener=counter)
+        self.assertEqual(labels(snap), {"unknown": (1, 1)})
+        self.assertLessEqual(counter.bytes_read[self.meta_path(path)], sources_claude._META_MAX_BYTES + 1)
+
+    def test_control_characters_and_non_ascii_are_sanitised(self):
+        nasty = "evil\x00\x1b[31m\n\r\t name/../‮é\U0001f600 ok"
+        self.hostile(json.dumps({"agentType": nasty}).encode())
+        types = [r["type"] for r in self.collect()["agents"]["last_7d"]]
+        self.assertEqual(len(types), 1)
+        self.assertRegex(types[0], SAFE_LABEL)
+        self.assertTrue(types[0].startswith("evil"))
+
+    def test_meta_that_is_a_directory_becomes_unknown(self):
+        path = self.subagent("p", "s1", "a1", None, [ev(60, output=1)], meta=False)
+        os.makedirs(self.meta_path(path))
+        self.assertEqual(labels(self.collect()), {"unknown": (1, 1)})
+
+    def test_unsafe_label_in_a_tampered_cache_is_sanitised_on_output(self):
+        # The cache is a plain file: a hand-edited label must still not reach the snapshot raw.
+        self.subagent("p", "s1", "a1", "core-researcher", [ev(60, output=1)])
+        self.collect()
+        cache = self.offsets()
+        for ent in cache["files"].values():
+            ent["agent"] = "bad\x1b[0m/" + "z" * 200
+        with open(os.path.join(self.state, "offsets.json"), "w") as fh:
+            json.dump(cache, fh)
+        types = [r["type"] for r in self.collect()["agents"]["last_7d"]]
+        self.assertEqual(len(types), 1)
+        self.assertRegex(types[0], SAFE_LABEL)
+
+
+class TestByDay(CollectBase):
+    """`tokens.by_day`: seven UTC-date entries derived from the hourly buckets."""
+
+    UTC_MIDNIGHT = NOW - (14 * H + 180)  # 2026-10-21T00:00:00Z
+
+    def reset_tree(self):
+        """Empty projects dir and cache, for subTests that re-run under another zone."""
+        shutil.rmtree(self.state, ignore_errors=True)
+        shutil.rmtree(self.tree.projects_dir)
+        os.makedirs(self.tree.projects_dir)
+
+    def test_shape_is_seven_ascending_dates_with_zero_filled_gaps(self):
+        self.session("p", "s1", [ev(60, output=5, input=1, cache_creation=2, cache_read=3)])
+        by_day = self.collect()["tokens"]["by_day"]
+        self.assertEqual(len(by_day), 7)
+        self.assertEqual([r["day"] for r in by_day], [day_of(NOW - i * D) for i in range(6, -1, -1)])
+        for row in by_day[:-1]:
+            self.assertEqual(row, {"day": row["day"], "output": 0, "input": 0, "cache_creation": 0, "cache_read": 0})
+        self.assertEqual(by_day[-1], {"day": day_of(NOW), "output": 5, "input": 1, "cache_creation": 2, "cache_read": 3})
+
+    def test_utc_date_derivation_in_non_utc_zones(self):
+        # 23:30Z on the 20th and 00:30Z on the 21st share ONE local date in Los Angeles (the 20th)
+        # and in Auckland (the 21st), but are on two different UTC dates. by_day must follow UTC.
+        for zone in ("America/Los_Angeles", "Pacific/Auckland", "Asia/Kolkata"):
+            with self.subTest(zone=zone):
+                pin_tz(self, zone)
+                self.reset_tree()
+                self.session("p", "s1", [usage_event(self.UTC_MIDNIGHT - 30 * 60, output=7),   # 10-20T23:30Z
+                                         usage_event(self.UTC_MIDNIGHT + 30 * 60, output=11)])  # 10-21T00:30Z
+                by = {r["day"]: r["output"] for r in self.collect()["tokens"]["by_day"]}
+                self.assertEqual(by["2026-10-20"], 7)
+                self.assertEqual(by["2026-10-21"], 11)
+
+    def test_today_is_the_utc_date_even_when_local_date_differs(self):
+        # 00:30Z on the 22nd is still the 21st in Los Angeles; the last entry must be the 22nd.
+        pin_tz(self, "America/Los_Angeles")
+        now2 = self.UTC_MIDNIGHT + D + 30 * 60
+        with mock.patch.dict(os.environ, {"GRID_FLEET_NOW": str(now2)}):
+            self.session("p", "s1", [usage_event(now2 - 60, output=3)])
+            by_day = self.collect()["tokens"]["by_day"]
+        self.assertEqual(by_day[-1]["day"], "2026-10-22")
+        self.assertEqual(by_day[-1]["output"], 3)
+        self.assertEqual(by_day[0]["day"], "2026-10-16")
+
+    def test_by_day_is_calendar_dates_so_it_differs_from_last_7d(self):
+        # Spec: last_7d is 168 hour buckets, by_day is 7 calendar dates, so they need not agree.
+        # 2026-10-14T15:00Z is inside the 168 buckets but before the first by_day date (10-15).
+        epoch = self.UTC_MIDNIGHT - 7 * D + 15 * H
+        self.session("p", "s1", [usage_event(epoch, output=100), ev(60, output=1)])
+        t = self.collect()["tokens"]
+        self.assertEqual(t["last_7d"]["output"], 101)
+        self.assertEqual(sum(r["output"] for r in t["by_day"]), 1)
+        self.assertNotIn("2026-10-14", [r["day"] for r in t["by_day"]])
+
+    def test_by_day_warm_run_equals_recount(self):
+        path = self.session("p", "s1", [ev(60, output=1), ev(2 * D, output=2)])
+        self.collect()
+        self.tree.append_events(path, [ev(30, output=4), ev(3 * D, output=8)])
+        warm = self.collect()["tokens"]["by_day"]
+        fresh = self.make_config(state=os.path.join(self.work, "fresh-state"))
+        self.assertEqual(warm, self.collect(fresh)["tokens"]["by_day"])
 
 
 class TestIncrementalScan(CollectBase):
