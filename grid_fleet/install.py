@@ -13,17 +13,24 @@ What this module does
           ever PRINTED as a note, never run.
   Each tick runs `collect` then `push` (push only if collect succeeded).
 
-What it deliberately does NOT do (yet)
---------------------------------------
-  `install --statusline` / restoring the statusLine on uninstall (task 8.3)
-  waits for the Group 7 tap. Nothing here reads or writes ~/.claude.
-  Writing hub/account into the config file is also not done here: `--interval`
-  only affects the timer (see the mismatch warning in `_warnings`).
+statusLine tap (`install --statusline`, task 8.3)
+-------------------------------------------------
+  Rewrites `statusLine.command` in <claude dir>/settings.json so the tap wraps the
+  user's original command, and saves the original in grid-fleet's config
+  (`statusline_original`). `--uninstall` puts it back byte-for-byte. It is the ONLY
+  code path that ever writes settings.json, and only after printing the exact
+  before/after, a TTY and a "y". See the "statusLine" section below.
+
+What it deliberately does NOT do
+--------------------------------
+  Writing hub/account into the config file is not done here: `--interval`
+  only affects the timer (see the mismatch warning in `_warnings`). The one config
+  key install writes is `statusline_original`.
 
 Safety model
 ------------
   * Default is PLAN: prints files + commands, changes nothing, runs nothing.
-  * `--apply` and `--uninstall` need an interactive TTY and a "y" answer.
+  * `--apply`, `--statusline` and `--uninstall` need an interactive TTY and a "y" answer.
   * Render functions are pure (return text) and unit-tested. The only side
     effects are file writes/removals under the user's own unit dirs and calls
     to `launchctl`/`systemctl` through an injectable runner.
@@ -34,12 +41,15 @@ Safety model
 """
 
 import argparse
+import collections
+import json
 import os
 import plistlib
 import shlex
 import subprocess
 import sys
 import tempfile
+import time
 from typing import Callable, List, Mapping, Optional, Sequence, Tuple
 
 from grid_fleet import config as cfg
@@ -313,15 +323,19 @@ def run_command(argv: Sequence[str]) -> Tuple[int, str]:
     return r.returncode, r.stdout
 
 
-def _write_atomic(path: str, text: str) -> None:
-    """Write via a temp file in the same dir + rename, so a crash never leaves half a unit."""
+def _write_atomic(path: str, text: str, mode: int = 0o644) -> None:
+    """Write via a temp file in the same dir + rename, so a crash never leaves half a file.
+
+    `mode` is applied to the temp file before the rename: units are world-readable
+    (0644); the statusLine code passes the existing file's own mode instead.
+    """
     d = os.path.dirname(path)
     os.makedirs(d, exist_ok=True)
     fd, tmp = tempfile.mkstemp(prefix=".grid-fleet.", suffix=".tmp", dir=d)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             fh.write(text)
-        os.chmod(tmp, 0o644)
+        os.chmod(tmp, mode)
         os.replace(tmp, path)
     except BaseException:
         if os.path.lexists(tmp):
@@ -428,6 +442,330 @@ def _uninstall(kind, paths, uid, runner, loaded):
     return (msgs or ["nothing to remove"]), ok
 
 
+# --- statusLine (task 8.3) -----------------------------------------------------------------
+#
+# Flow for `install --statusline`:   read settings -> build edit -> print exact
+# before/after -> TTY + "y" -> backup -> save original to config -> atomic write.
+# Everything up to the confirmation is read-only. Order of the writes matters:
+#   1. backup of settings.json (a byte copy)
+#   2. config `statusline_original` (so the original can never be lost)
+#   3. settings.json itself
+# A failure after step 2 leaves a harmless stale config value; a re-run overwrites it.
+
+SETTINGS_FILE = "settings.json"
+BACKUP_INFIX = ".grid-fleet-backup-"
+CONFIG_KEY = "statusline_original"
+# /bin/sh is what Claude Code's own command runner uses (node's default shell), so
+# running the original through `sh -c` keeps its quoting, `$VAR`, `~`, `&&` and pipes
+# meaning exactly what they meant before the wrap.
+SHELL_ARGV = ["/bin/sh", "-c"]
+_NO_STATUSLINE = "(no statusLine configured)"
+
+# action: "change" (write new_text), "noop" (message only) or "refuse" (message, exit 1).
+StatuslineEdit = collections.namedtuple(
+    "StatuslineEdit", "action message path raw new_text before after note original")
+
+
+def settings_path(config, env: Mapping[str, str]) -> str:
+    """<claude dir>/settings.json. config.claude_dir already honours GRID_FLEET_CLAUDE_DIR
+    and CLAUDE_CONFIG_DIR; the fallback uses the injected env's HOME, never the real one."""
+    return os.path.join(config.claude_dir or os.path.join(_home(env), ".claude"), SETTINGS_FILE)
+
+
+def tap_command(python: str, script: str, original: Optional[str]) -> str:
+    """The new `statusLine.command`: `<python> <script> tap -- /bin/sh -c '<original>'`.
+
+    The tap runs everything after `--` as an argv WITHOUT a shell (limits._run_original),
+    but `statusLine.command` is a shell string. Passing the original as one quoted
+    `sh -c` argument is therefore the only form that preserves its meaning for every
+    original (flags, quotes, `$`, `&&`). With no original (or an empty one) the tap
+    gets no command and prints nothing.
+    """
+    base = "%s %s tap --" % (shlex.quote(python), shlex.quote(script))
+    if not original:
+        return base
+    return "%s %s %s" % (base, " ".join(SHELL_ARGV), shlex.quote(original))
+
+
+def _tap_words(command: str) -> Optional[List[str]]:
+    """The words after `tap --` if `command` is a grid-fleet tap wrapper, else None."""
+    try:
+        words = shlex.split(command)
+    except ValueError:
+        return None
+    if len(words) >= 4 and os.path.basename(words[1]) == "grid-fleet" and words[2:4] == ["tap", "--"]:
+        return words[4:]
+    return None
+
+
+def is_tap_command(command: str) -> bool:
+    return _tap_words(command) is not None
+
+
+def _original_from_tap(command: str) -> Optional[str]:
+    """Recover the original from a wrapper we wrote (fallback when config lost it).
+    Raises InstallError for a tap command whose tail is not a form we produce."""
+    rest = _tap_words(command) or []
+    if not rest:
+        return None
+    if rest[:2] == SHELL_ARGV and len(rest) == 3:
+        return rest[2]
+    raise InstallError("cannot tell what the original statusLine was from %r" % command)
+
+
+# -- settings file I/O ---------------------------------------------------------------------
+
+_STYLES = [(indent, ascii_, nl) for indent in (2, 4, "\t", None)
+           for ascii_ in (False, True) for nl in ("\n", "")]
+
+
+def _dump(data, style) -> str:
+    indent, ascii_, nl = style
+    return json.dumps(data, indent=indent, ensure_ascii=ascii_) + nl
+
+
+def _pick_style(data, text: str):
+    """Find the JSON layout that reproduces `text` byte-for-byte, so the rewrite does not
+    reformat the user's file. Returns (style, exact); falls back to 2-space + newline."""
+    for style in _STYLES:
+        if _dump(data, style) == text:
+            return style, True
+    return (2, False, "\n"), False
+
+
+def _read_json_object(path: str, what: str):
+    """(raw bytes, parsed dict) or InstallError. Key order is kept (dicts are ordered)."""
+    try:
+        with open(path, "rb") as fh:
+            raw = fh.read()
+    except FileNotFoundError:
+        raise InstallError("%s not found: %s" % (what, path))
+    except OSError as exc:
+        raise InstallError("cannot read %s %s: %s" % (what, path, exc.strerror or exc))
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except ValueError as exc:  # includes UnicodeDecodeError and JSONDecodeError
+        raise InstallError("%s is not valid JSON, left untouched: %s (%s)" % (what, path, exc))
+    if not isinstance(data, dict):
+        raise InstallError("%s is not a JSON object, left untouched: %s" % (what, path))
+    return raw, data
+
+
+def _mode_of(path: str) -> int:
+    return os.stat(path).st_mode & 0o777
+
+
+def _backup(path: str, raw: bytes) -> str:
+    """Byte copy of the settings file next to it, with its mode, never overwriting one."""
+    stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime(cfg.now()))
+    mode = _mode_of(path)
+    for n in range(100):
+        dest = "%s%s%s%s" % (path, BACKUP_INFIX, stamp, "" if n == 0 else "-%d" % n)
+        try:
+            fd = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            continue
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(raw)
+        os.chmod(dest, mode)
+        return dest
+    raise InstallError("could not find a free backup name for %s" % path)
+
+
+def _write_json_file(path: str, data: dict, style, mode: int) -> None:
+    """Atomic rewrite through symlinks: a dotfile-managed symlink stays a symlink."""
+    _write_atomic(os.path.realpath(path), _dump(data, style), mode)
+
+
+# -- building the edit ---------------------------------------------------------------------
+
+
+def _show(value: Optional[str]) -> str:
+    """Exact rendering of a command for the diff: JSON string syntax shows every escape."""
+    return _NO_STATUSLINE if value is None else json.dumps(value, ensure_ascii=False)
+
+
+def _statusline_command(data: dict):
+    """(statusLine value, its command or None). InstallError for a shape we will not guess."""
+    sl = data.get("statusLine")
+    if sl is None:
+        return None, None
+    if (isinstance(sl, dict) and isinstance(sl.get("command"), str)
+            and sl.get("type", "command") == "command"):
+        return sl, sl["command"]
+    raise InstallError("statusLine in settings.json has a shape grid-fleet does not handle "
+                       "(expected {\"type\": \"command\", \"command\": \"...\"}); not changing it")
+
+
+def plan_statusline_install(path: str, python: str, script: str) -> StatuslineEdit:
+    """Read-only. The edit that wraps the current statusLine in the tap."""
+    raw, data = _read_json_object(path, "settings file")
+    style, exact = _pick_style(data, raw.decode("utf-8"))
+    sl, current = _statusline_command(data)
+    if current is not None and is_tap_command(current):
+        # Never double-wrap. (If the clone moved, the old wrapper keeps pointing at the old
+        # path: `--uninstall` then `--statusline` re-points it.)
+        return StatuslineEdit("noop", "statusLine is already wrapped by grid-fleet; nothing "
+                              "to change", path, raw, None, current, current, "", None)
+    wrapped = tap_command(python, script, current)
+    new_sl = {"type": "command", "command": wrapped} if sl is None else dict(sl, command=wrapped)
+    new_data = dict(data)  # a copy keeps key order; an existing statusLine stays in place
+    new_data["statusLine"] = new_sl
+    note = "" if exact else ("note: settings.json is not in a layout grid-fleet can reproduce; "
+                             "it will be rewritten as 2-space JSON (same values and key order)")
+    return StatuslineEdit("change", "", path, raw, _dump(new_data, style), current, wrapped,
+                          note, current)
+
+
+def plan_statusline_restore(path: str, saved: Optional[str]) -> StatuslineEdit:
+    """Read-only. The edit that puts the original statusLine back.
+
+    `saved` is config statusline_original (None = unknown); when None the original is
+    recovered from the wrapper itself, and a wrapper with no original means we created
+    the statusLine, so it is removed again.
+    """
+    try:
+        raw, data = _read_json_object(path, "settings file")
+    except InstallError as exc:
+        if not os.path.lexists(path):
+            return StatuslineEdit("noop", "no settings file, nothing to restore: %s" % path,
+                                  path, b"", None, None, None, "", None)
+        return StatuslineEdit("refuse", "statusLine NOT restored: %s" % exc,
+                              path, b"", None, None, None, "", None)
+    style, exact = _pick_style(data, raw.decode("utf-8"))
+    try:
+        sl, current = _statusline_command(data)
+    except InstallError:  # a shape we could never have written: not ours, leave it
+        sl, current = None, None
+    if current is None or not is_tap_command(current):
+        return StatuslineEdit("noop", "statusLine is not wrapped by grid-fleet; nothing to "
+                              "restore", path, raw, None, current, current, "", None)
+    try:
+        original = saved if saved is not None else _original_from_tap(current)
+        new_data = dict(data)
+        if original is None:
+            # We created the whole statusLine; remove it, but only if nobody added to it.
+            if set(sl) - {"type", "command"}:
+                raise InstallError("statusLine has extra keys and no saved original; "
+                                   "restore it by hand")
+            del new_data["statusLine"]
+        else:
+            new_data["statusLine"] = dict(sl, command=original)
+    except InstallError as exc:
+        return StatuslineEdit("refuse", "statusLine NOT restored: %s" % exc, path, raw,
+                              None, None, None, "", None)
+    note = "" if exact else ("note: settings.json will be rewritten as 2-space JSON "
+                             "(same values and key order)")
+    return StatuslineEdit("change", "", path, raw, _dump(new_data, style), current,
+                          original, note, original)
+
+
+# -- applying ------------------------------------------------------------------------------
+
+
+def _set_config_original(config_path: str, value: Optional[str], create: bool) -> None:
+    """Set (or clear, value=None) `statusline_original` in the config file, keeping every
+    other key. Raises InstallError if the file is unusable, OSError on write failure."""
+    if os.path.lexists(config_path):
+        raw, data = _read_json_object(config_path, "config file")
+        style, _exact = _pick_style(data, raw.decode("utf-8"))
+        mode = _mode_of(config_path)
+    elif create:
+        data, style, mode = {"schema": cfg.SCHEMA}, (2, False, "\n"), 0o600
+    else:
+        return
+    data[CONFIG_KEY] = value
+    _write_json_file(config_path, data, style, mode)
+
+
+def _apply_statusline_edit(edit: StatuslineEdit, config_path: str, restoring: bool) -> str:
+    """Perform a confirmed edit; returns the backup path. Raises InstallError / OSError."""
+    # The user (or Claude Code) may have saved settings.json while we waited for the "y".
+    try:
+        with open(edit.path, "rb") as fh:
+            still = fh.read()
+    except OSError as exc:
+        raise InstallError("cannot re-read %s: %s" % (edit.path, exc.strerror or exc))
+    if still != edit.raw:
+        raise InstallError("%s changed while waiting for confirmation; nothing was changed, "
+                           "re-run" % edit.path)
+    mode = _mode_of(edit.path)
+    backup = _backup(edit.path, edit.raw)
+    if not restoring:
+        _set_config_original(config_path, edit.original, create=True)
+    _write_atomic(os.path.realpath(edit.path), edit.new_text, mode)
+    if restoring:
+        # Settings are already right; clearing the saved value is housekeeping.
+        try:
+            _set_config_original(config_path, None, create=False)
+        except (InstallError, OSError) as exc:
+            sys.stderr.write("grid-fleet install: statusLine restored, but could not clear "
+                             "%s in the config: %s\n" % (CONFIG_KEY, exc))
+    return backup
+
+
+def _print_edit(edit: StatuslineEdit, config_path: str, restoring: bool) -> None:
+    """The exact before/after the user is asked to confirm."""
+    out = sys.stdout
+    out.write("%s\n  settings: %s\n  statusLine.command\n    before: %s\n    after:  %s\n"
+              % ("statusLine restore" if restoring else "grid-fleet install --statusline",
+                 edit.path, _show(edit.before),
+                 "(statusLine removed)" if edit.after is None else _show(edit.after)))
+    out.write("  all other settings: unchanged\n")
+    out.write("  backup: %s<UTC time> (written first)\n" % (edit.path + BACKUP_INFIX))
+    if not restoring:
+        out.write("  original saved to %s as %s\n" % (config_path, CONFIG_KEY))
+    if edit.note:
+        out.write("  %s\n" % edit.note)
+
+
+def _statusline_main(config, args, explicit_interval, env, runner, python, script, uid,
+                     is_tty, prompt) -> int:
+    """`install --statusline [--uninstall]`: the statusLine half only, no timers touched."""
+    if explicit_interval is not None:
+        sys.stderr.write("grid-fleet install: --interval does not apply to --statusline\n")
+        return EXIT_USAGE
+    if getattr(args, "uninstall", False):
+        sl = plan_statusline_restore(settings_path(config, env), _saved_original(config))
+        return _run_uninstall(None, [], uid, runner, is_tty, prompt, sl, config.config_path,
+                              timers=False)
+    if not python or not os.path.isabs(python) or not os.path.isabs(script):
+        sys.stderr.write("grid-fleet install: need absolute paths for python and script "
+                         "(got %r, %r)\n" % (python, script))
+        return EXIT_USAGE
+    return _statusline_install(config, env, python, script, is_tty, prompt)
+
+
+def _statusline_install(config, env, python, script, is_tty, prompt) -> int:
+    path = settings_path(config, env)
+    try:
+        edit = plan_statusline_install(path, python, script)
+        if os.path.lexists(config.config_path):  # fail now, not after the "y"
+            _read_json_object(config.config_path, "config file")
+    except InstallError as exc:
+        sys.stderr.write("grid-fleet install: %s\n" % exc)
+        return EXIT_REFUSED
+    if edit.action == "noop":
+        sys.stdout.write("%s\n" % edit.message)
+        return EXIT_OK
+    _print_edit(edit, config.config_path, restoring=False)
+    if not is_tty():
+        sys.stderr.write("grid-fleet install: --statusline needs an interactive terminal to "
+                         "confirm; nothing was changed\n")
+        return EXIT_REFUSED
+    if not _confirm(prompt):
+        sys.stdout.write("declined: nothing was changed\n")
+        return EXIT_REFUSED
+    try:
+        backup = _apply_statusline_edit(edit, config.config_path, restoring=False)
+    except (InstallError, OSError) as exc:
+        sys.stderr.write("grid-fleet install: %s\n" % exc)
+        return EXIT_REFUSED
+    sys.stdout.write("statusLine now runs the tap\nbackup: %s\nundo: grid-fleet install "
+                     "--uninstall\n" % backup)
+    return EXIT_OK
+
+
 # --- CLI ---------------------------------------------------------------------------------
 
 
@@ -449,8 +787,13 @@ def add_arguments(parser) -> None:
                         % ", ".join(map(str, cfg.ALLOWED_INTERVALS)))
     parser.add_argument("--apply", action="store_true",
                         help="perform the plan after an interactive y/N (default: print only)")
+    parser.add_argument("--statusline", action="store_true",
+                        help="wrap statusLine.command in ~/.claude/settings.json with the tap "
+                        "(shows the exact before/after, asks y/N, backs the file up); with "
+                        "--uninstall, only restore the saved statusLine")
     parser.add_argument("--uninstall", action="store_true",
-                        help="unload and remove the timer files this tool created")
+                        help="unload and remove the timer files this tool created, and "
+                        "restore the saved statusLine")
 
 
 def install_main(config, args, *, runner: Optional[Runner] = None,
@@ -472,6 +815,9 @@ def install_main(config, args, *, runner: Optional[Runner] = None,
     uid = os.getuid() if uid is None else uid
 
     explicit = getattr(args, "interval", None)
+    if getattr(args, "statusline", False):
+        return _statusline_main(config, args, explicit, env, runner, python, script, uid,
+                                is_tty, prompt)
     interval_s = explicit if explicit is not None else config.interval_s
     if interval_s not in cfg.ALLOWED_INTERVALS:  # also guards programmatic callers
         sys.stderr.write("grid-fleet install: interval must be one of %s (got %r)\n"
@@ -496,7 +842,8 @@ def install_main(config, args, *, runner: Optional[Runner] = None,
     uninstall = bool(getattr(args, "uninstall", False))
 
     if uninstall:
-        return _run_uninstall(kind, paths, uid, runner, is_tty, prompt)
+        sl = plan_statusline_restore(settings_path(config, env), _saved_original(config))
+        return _run_uninstall(kind, paths, uid, runner, is_tty, prompt, sl, config.config_path)
 
     plan = render_plan(kind, interval_s, python, script, path_env,
                        [(s, p) for s, p, _t in entries], command_plan(kind, uid, paths),
@@ -535,20 +882,39 @@ def install_main(config, args, *, runner: Optional[Runner] = None,
     return EXIT_OK
 
 
-def _run_uninstall(kind, paths, uid, runner, is_tty, prompt) -> int:
-    """--uninstall: show what would go, confirm, then remove owned files only."""
-    present = [(file_state(p, ""), p) for p in paths]
+def _saved_original(config) -> Optional[str]:
+    """statusline_original as saved in the config FILE (the source of truth), falling back
+    to the loaded Config when the file is gone. None means "unknown / none"."""
+    try:
+        _raw, data = _read_json_object(config.config_path, "config file")
+    except InstallError:
+        value = config.statusline_original
+    else:
+        value = data.get(CONFIG_KEY)
+    return value if isinstance(value, str) else None
+
+
+def _run_uninstall(kind, paths, uid, runner, is_tty, prompt, sl, config_path, timers=True) -> int:
+    """--uninstall: show what would go, confirm once, then remove owned timer files and
+    restore the statusLine. `sl` is a plan_statusline_restore() edit; timers=False limits
+    the run to the statusLine (`--statusline --uninstall`)."""
+    present = [(file_state(p, ""), p) for p in paths] if timers else []
     # Read-only query, so a job whose files were deleted by hand is still found.
-    loaded = _is_loaded(kind, uid, runner)
-    sys.stdout.write("grid-fleet uninstall plan (%s)\n" % kind)
+    loaded = _is_loaded(kind, uid, runner) if timers else False
+    sys.stdout.write("grid-fleet uninstall plan (%s)\n" % (kind if timers else "statusLine only"))
     for state, p in present:
         what = {"new": "absent", "unchanged": "remove", "update": "remove"}.get(state, "leave (%s)" % state)
         sys.stdout.write("  %-14s %s\n" % (what, p))
     if loaded:
         sys.stdout.write("  %-14s %s\n" % ("unload", " ".join(_unload_argv(kind, uid))))
-    if all(s == "new" for s, _p in present) and not loaded:
+    if sl.action == "change":
+        _print_edit(sl, config_path, restoring=True)
+    else:
+        sys.stdout.write("  statusLine: %s\n" % sl.message)
+    timers_work = loaded or any(s != "new" for s, _p in present)
+    if not (timers_work or sl.action == "change"):
         sys.stdout.write("nothing to remove\n")
-        return EXIT_OK
+        return EXIT_REFUSED if sl.action == "refuse" else EXIT_OK
     if not is_tty():
         sys.stderr.write("grid-fleet install: --uninstall needs an interactive terminal to "
                          "confirm; nothing was changed\n")
@@ -556,11 +922,21 @@ def _run_uninstall(kind, paths, uid, runner, is_tty, prompt) -> int:
     if not _confirm(prompt):
         sys.stdout.write("declined: nothing was changed\n")
         return EXIT_REFUSED
-    try:
-        msgs, ok = _uninstall(kind, paths, uid, runner, loaded)
-    except OSError as exc:
-        sys.stderr.write("grid-fleet install: %s\n" % exc)
-        return EXIT_REFUSED
+    msgs, ok = [], sl.action != "refuse"
+    if timers:
+        try:
+            msgs, ok_t = _uninstall(kind, paths, uid, runner, loaded)
+            ok = ok and ok_t
+        except OSError as exc:
+            sys.stderr.write("grid-fleet install: %s\n" % exc)
+            return EXIT_REFUSED
+    if sl.action == "change":
+        try:
+            msgs.append("statusLine restored; backup: %s"
+                        % _apply_statusline_edit(sl, config_path, restoring=True))
+        except (InstallError, OSError) as exc:
+            msgs.append("statusLine NOT restored: %s" % exc)
+            ok = False
     for m in msgs:
         sys.stdout.write(m + "\n")
     return EXIT_OK if ok else EXIT_REFUSED
