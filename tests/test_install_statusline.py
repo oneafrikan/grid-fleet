@@ -670,5 +670,365 @@ class TestTapCommandForm(unittest.TestCase):
         self.assertEqual(seen["argv"], ["/bin/sh", "-c", original])
 
 
+def _stream(tty):
+    """A text stream that reports `tty` from isatty(); StringIO is never a TTY itself."""
+    import io
+
+    class _S(io.StringIO):
+        def isatty(self):
+            return tty
+    return _S()
+
+
+class TestSharedConfigTwoClaudeDirs(StatuslineCase):
+    """QA finding F1: one grid-fleet config, two Claude dirs. The config keeps a single
+    `statusline_original` slot, so the original embedded in each dir's own wrapper (not the
+    slot) must decide what that dir gets back."""
+
+    A_CMD, B_CMD = "echo ORIGINAL-A", "echo ORIGINAL-B"
+
+    def setUp(self):
+        super().setUp()
+        self.dir_b = os.path.join(self.work, "claude-b")
+        os.makedirs(self.dir_b)
+        self.settings_b = os.path.join(self.dir_b, "settings.json")
+        self.write_settings(dict(SETTINGS, statusLine={"type": "command", "command": self.A_CMD}))
+        with open(self.settings_b, "w") as fh:
+            fh.write(dump(dict(SETTINGS, statusLine={"type": "command", "command": self.B_CMD})))
+        self.before_a, self.before_b = _readb(self.settings), _readb(self.settings_b)
+
+    def config_b(self):
+        return cfg.load_config({"GRID_FLEET_CONFIG": self.cfg_path, "GRID_FLEET_STATE_DIR": self.state,
+                                "GRID_FLEET_CLAUDE_DIR": self.dir_b, "HOME": self.home})
+
+    def slot(self):
+        return json.loads(_read(self.cfg_path)).get("statusline_original")
+
+    def install_both(self):
+        self.assertEqual(self.sl()[0], 0)
+        self.assertEqual(self.run_install("launchd", config=self.config_b(), statusline=True)[0], 0)
+        self.assertEqual(self.slot(), self.B_CMD, "last install owns the single slot")
+
+    def uninstall_b(self):
+        return self.run_install("launchd", config=self.config_b(), uninstall=True, statusline=True)
+
+    def test_each_dir_gets_back_its_own_original(self):
+        self.install_both()
+        rc, out, err = self.uninstall(only_statusline=True)  # dir A; the slot holds B's value
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(_readb(self.settings), self.before_a)  # NOT ORIGINAL-B
+        # The disagreement is shown before the question, naming both values.
+        self.assertIn("note:", out)
+        self.assertIn(self.A_CMD, out)
+        self.assertIn(self.B_CMD, out)
+        # Restoring A must not wipe B's slot value ...
+        self.assertEqual(self.slot(), self.B_CMD)
+        # ... and B still restores correctly, then clears the slot it owns.
+        rc, out, err = self.uninstall_b()
+        self.assertEqual(rc, 0, err)
+        self.assertNotIn("differs", out)
+        self.assertEqual(_readb(self.settings_b), self.before_b)
+        self.assertIsNone(self.slot())
+
+    def test_reverse_order_also_restores_correctly(self):
+        self.install_both()
+        self.assertEqual(self.uninstall_b()[0], 0)
+        self.assertEqual(_readb(self.settings_b), self.before_b)
+        self.assertEqual(self.uninstall(only_statusline=True)[0], 0)
+        self.assertEqual(_readb(self.settings), self.before_a)
+
+    def test_a_dir_without_an_original_is_not_given_another_dirs_slot(self):
+        # B had no statusLine when wrapped; the slot then holds A's value.
+        with open(self.settings_b, "w") as fh:
+            fh.write(dump({"k": 1}))
+        before_b = _readb(self.settings_b)
+        self.assertEqual(self.run_install("launchd", config=self.config_b(), statusline=True)[0], 0)
+        self.assertEqual(self.sl()[0], 0)
+        self.assertEqual(self.slot(), self.A_CMD)
+        self.assertEqual(self.uninstall_b()[0], 0)
+        self.assertEqual(_readb(self.settings_b), before_b)  # statusLine removed, not ORIGINAL-A
+        self.assertEqual(self.slot(), self.A_CMD, "A's saved value survives B's restore")
+
+    def test_legacy_config_with_a_matching_slot_restores_without_a_note(self):
+        # Configs written before this change hold the same single key; reading them is unchanged.
+        self.assertEqual(self.sl()[0], 0)
+        self.assertEqual(self.slot(), self.A_CMD)
+        rc, out, _ = self.uninstall(only_statusline=True)
+        self.assertEqual(rc, 0)
+        self.assertNotIn("differs", out)
+        self.assertEqual(_readb(self.settings), self.before_a)
+
+    def test_legacy_config_with_no_slot_restores_from_the_wrapper(self):
+        self.assertEqual(self.sl()[0], 0)
+        data = json.loads(_read(self.cfg_path))
+        del data["statusline_original"]
+        self.write_config(data)
+        rc, out, _ = self.uninstall(only_statusline=True)
+        self.assertEqual(rc, 0)
+        self.assertNotIn("differs", out)
+        self.assertEqual(_readb(self.settings), self.before_a)
+
+
+class TestLookalikeWrappers(StatuslineCase):
+    """QA finding F2: a hand-edited or lookalike wrapper is never replaced by a stale saved
+    value; it is refused untouched with both values named."""
+
+    def wrap_then_edit(self, edit):
+        """Install over `echo STALE`, then let `edit(command)` produce a hand-edited one."""
+        self.write_settings(dict(SETTINGS, statusLine={"type": "command", "command": "echo STALE"}))
+        self.assertEqual(self.sl()[0], 0)
+        data = self.settings_json()
+        data["statusLine"]["command"] = edit(data["statusLine"]["command"])
+        return self.write_settings(data)
+
+    def assert_refused_untouched(self, edited):
+        rc, out, _ = self.uninstall(only_statusline=True)
+        self.assertNotEqual(rc, 0)
+        self.assertIn("NOT restored", out)
+        self.assertIn("echo STALE", out)       # the saved value is named ...
+        self.assertIn("by hand", out)          # ... and the way forward is explained
+        self.assertEqual(self.prompts, [])
+        self.assertEqual(_readb(self.settings), edited)
+        self.assertEqual(len(self.backups()), 1, "only the install backup")
+        self.assertEqual(json.loads(_read(self.cfg_path))["statusline_original"], "echo STALE")
+
+    def test_our_wrapper_with_a_hand_appended_tail_is_refused(self):
+        self.assert_refused_untouched(self.wrap_then_edit(lambda c: c + " && echo done"))
+
+    def test_a_lookalike_tap_of_another_script_is_refused(self):
+        self.assert_refused_untouched(
+            self.wrap_then_edit(lambda c: "python3 /x/grid-fleet tap -- /my/other.sh"))
+
+    def test_a_hand_edited_sh_wrapper_is_restored_to_what_it_embeds(self):
+        # Parseable (our exact form) but the embedded command was changed by hand: the
+        # wrapper decides, the stale slot is only mentioned.
+        self.wrap_then_edit(lambda c: install.tap_command(PY, SCRIPT, "echo HAND-EDITED"))
+        rc, out, _ = self.uninstall(only_statusline=True)
+        self.assertEqual(rc, 0)
+        self.assertEqual(self.settings_json()["statusLine"]["command"], "echo HAND-EDITED")
+        self.assertIn("echo STALE", out)
+        self.assertIn("echo HAND-EDITED", out)
+
+
+class TestMissingWrapperScript(StatuslineCase):
+    """QA finding F3: a wrapper whose script is gone is still a no-op, but says so."""
+
+    def test_missing_script_warns_with_the_path_and_the_fix(self):
+        gone = "/synth-gone/clone/bin/grid-fleet"
+        before = self.write_settings(dict(SETTINGS, statusLine={
+            "type": "command", "command": install.tap_command(PY, gone, "echo x")}))
+        rc, out, err = self.sl()
+        self.assertEqual(rc, 0)
+        self.assertIn("already wrapped", out)
+        self.assertIn(gone, err)
+        self.assertIn("does not exist", err)
+        self.assertIn("--statusline --uninstall", err)
+        self.assertIn("then `grid-fleet install --statusline`", err)
+        self.assertEqual(_readb(self.settings), before)
+        self.assertEqual(self.prompts, [])
+
+    def test_existing_script_gives_no_warning(self):
+        script = os.path.join(self.work, "grid-fleet")
+        with open(script, "w") as fh:
+            fh.write("#!/bin/sh\n")
+        self.write_settings(dict(SETTINGS, statusLine={
+            "type": "command", "command": install.tap_command(PY, script, "echo x")}))
+        rc, out, err = self.sl()
+        self.assertEqual((rc, err), (0, ""))
+        self.assertIn("already wrapped", out)
+
+
+class TestUnwritableAndLossyRewrites(StatuslineCase):
+    """QA findings F4 and F5: refuse cleanly instead of a traceback or a lossy rewrite."""
+
+    # Odd spacing makes the layout unreproducible; "\\ud800" is a lone-surrogate JSON escape.
+    LONE_SURROGATE = '{"statusLine":{"command":"x"},   "k":"\\ud800"}'
+
+    def assert_clean_refusal(self, text, expect):
+        before = self.write_settings(text=text)
+        rc, out, err = self.sl()
+        self.assertEqual(rc, 1, err)
+        self.assertIn(expect, err)
+        self.assertNotIn("Traceback", err)
+        self.assertEqual(_readb(self.settings), before)
+        self.assertEqual(self.backups(), [])
+        self.assertFalse(os.path.exists(self.cfg_path), "config not touched either")
+        self.assertEqual(self.prompts, [], "refused before the question")
+
+    def test_lone_surrogate_in_an_unreproducible_layout_is_refused_cleanly(self):
+        self.assert_clean_refusal(self.LONE_SURROGATE, "UTF-8")
+
+    def test_lone_surrogate_in_a_reproducible_layout_is_fine(self):
+        # ensure_ascii layouts write the escape back as ASCII; nothing to refuse.
+        text = dump({"statusLine": {"type": "command", "command": "x"}, "k": "\ud800"},
+                    ascii_=True)
+        self.write_settings(text=text)
+        rc, _, err = self.sl()
+        self.assertEqual(rc, 0, err)
+
+    def test_valueerror_during_the_settings_write_is_caught(self):
+        before = self.write_settings()
+        orig = install._write_atomic
+
+        def boom(path, text, mode=0o644):
+            if os.path.realpath(path).endswith("settings.json"):
+                raise UnicodeEncodeError("utf-8", "x", 0, 1, "synthetic")
+            return orig(path, text, mode)
+
+        with mock.patch.object(install, "_write_atomic", boom):
+            rc, _, err = self.sl()
+        self.assertEqual(rc, 1)
+        self.assertNotIn("Traceback", err)
+        self.assertEqual(_readb(self.settings), before)
+        self.assertFalse(os.path.exists(self.cfg_path), "config is saved only after settings")
+
+    def test_failed_settings_write_does_not_touch_an_existing_config(self):
+        self.write_settings()
+        self.write_config({"schema": 1, "statusline_original": "echo KEEP"})
+        before_cfg = _readb(self.cfg_path)
+        with mock.patch.object(install, "_write_atomic", side_effect=OSError("synthetic")):
+            self.assertEqual(self.sl()[0], 1)
+        self.assertEqual(_readb(self.cfg_path), before_cfg)
+
+    def test_unreproducible_note_lists_what_can_change(self):
+        self.write_settings(text='{"statusLine":{"command":"x"},   "k":1}')
+        _, out, _ = self.sl()
+        for word in ("duplicate keys", "CRLF", "number"):
+            self.assertIn(word, out)
+        self.assertNotIn("same values and key order", out)
+
+    def test_duplicate_keys_and_crlf_are_really_what_changes(self):
+        self.write_settings(text='{"a": 1,\r\n "a": 2, "statusLine": {"command": "x"}}')
+        self.assertEqual(self.sl()[0], 0)
+        text = _read(self.settings)
+        self.assertEqual(text.count('"a"'), 1)
+        self.assertNotIn("\r", text)
+
+    def test_a_number_that_would_become_infinity_is_refused_untouched(self):
+        self.assert_clean_refusal('{"statusLine":{"command":"x"},   "n":1e999}', "valid JSON")
+
+    def test_nan_in_a_reproducible_layout_is_kept_as_is(self):
+        text = ('{\n  "n": NaN,\n  "statusLine": {\n    "type": "command",\n'
+                '    "command": "x"\n  }\n}\n')
+        self.write_settings(text=text)
+        self.assertEqual(self.sl()[0], 0)
+        self.assertIn('"n": NaN', _read(self.settings))
+
+    def test_restore_also_refuses_a_lossy_nonfinite_rewrite(self):
+        # A wrapped file whose layout is not reproducible and holds 1e999 (hand-edited in
+        # after the install): the restore must refuse rather than write `Infinity`.
+        wrapped = ('{"n":1e999,   "statusLine":{"type":"command","command":%s}}'
+                   % json.dumps(install.tap_command(PY, SCRIPT, "x")))
+        self.write_settings(text=wrapped)
+        rc, out, _ = self.uninstall(only_statusline=True)
+        self.assertEqual(rc, 1)
+        self.assertIn("NOT restored", out)
+        self.assertEqual(_read(self.settings), wrapped)
+
+
+class TestDetectionStrictness(unittest.TestCase):
+    """Mutation guards for is_tap_command: it needs `tap` immediately followed by `--`
+    right after the script word, not merely `tap` somewhere."""
+
+    def test_tap_elsewhere_in_the_words_is_not_a_wrapper(self):
+        for cmd in ("python3 /x/grid-fleet collect tap -- x",   # "tap" in words, wrong place
+                    "python3 /x/grid-fleet tap /y/z.sh arg",    # tap without --
+                    "python3 /x/grid-fleet tap x --",           # -- not adjacent
+                    "python3 /x/grid-fleet view tap"):
+            self.assertFalse(install.is_tap_command(cmd), cmd)
+
+
+class TestFailedRestoreAndPromptRace(StatuslineCase):
+    def test_failed_restore_exits_1(self):
+        self.write_settings()
+        self.sl()
+        wrapped = _readb(self.settings)
+        orig = install._write_atomic
+
+        def boom(path, text, mode=0o644):
+            if os.path.realpath(path).endswith("settings.json"):
+                raise OSError("synthetic write failure")
+            return orig(path, text, mode)
+
+        with mock.patch.object(install, "_write_atomic", boom):
+            rc, out, _ = self.uninstall(only_statusline=True)
+        self.assertEqual(rc, 1)
+        self.assertEqual(rc, install.EXIT_REFUSED)
+        self.assertIn("NOT restored", out)
+        self.assertEqual(_readb(self.settings), wrapped)
+
+    def test_restore_aborts_when_settings_change_during_the_prompt(self):
+        import contextlib
+        import io
+        self.write_settings()
+        self.sl()
+        self.config = self.make_config()
+        changed = dump(dict(self.settings_json(), zeta=99))
+
+        def prompt(_text):
+            with open(self.settings, "w") as fh:  # Claude Code saved a setting meanwhile
+                fh.write(changed)
+            return "y"
+
+        n_backups = len(self.backups())
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = install.install_main(self.config, self.args(statusline=True, uninstall=True),
+                                      runner=self.runner, env=self.env, platform="darwin",
+                                      python=PY, script=SCRIPT, uid=1, is_tty=lambda: True,
+                                      prompt=prompt)
+        self.assertNotEqual(rc, 0)
+        self.assertIn("changed while waiting", out.getvalue())
+        self.assertEqual(_read(self.settings), changed)
+        self.assertEqual(len(self.backups()), n_backups)
+
+
+class TestRealTtyCheck(StatuslineCase):
+    """The default is_tty (install._tty) must need BOTH stdin and stdout to be terminals.
+    Streams are injected; the helper itself is not replaced."""
+
+    def run_with_streams(self, stdin_tty, stdout_tty):
+        import contextlib
+        self.write_settings()
+        self.config = self.make_config()
+        prompts, err = [], _stream(False)
+        out = _stream(stdout_tty)
+        with mock.patch.object(sys, "stdin", _stream(stdin_tty)), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = install.install_main(self.config, self.args(statusline=True), runner=self.runner,
+                                      env=self.env, platform="darwin", python=PY, script=SCRIPT,
+                                      uid=1, prompt=lambda t: prompts.append(t) or "y")
+        return rc, prompts, err.getvalue()
+
+    def test_both_terminals_proceeds(self):
+        rc, prompts, _ = self.run_with_streams(True, True)
+        self.assertEqual((rc, len(prompts)), (0, 1))
+
+    def test_piped_stdin_with_terminal_stdout_refuses(self):
+        rc, prompts, err = self.run_with_streams(False, True)
+        self.assertEqual((rc, prompts), (1, []))
+        self.assertIn("interactive terminal", err)
+        self.assertEqual(_read(self.settings), dump(SETTINGS))
+
+    def test_terminal_stdin_with_piped_stdout_refuses(self):
+        rc, prompts, err = self.run_with_streams(True, False)
+        self.assertEqual((rc, prompts), (1, []))
+        self.assertIn("interactive terminal", err)
+        self.assertEqual(_read(self.settings), dump(SETTINGS))
+
+
+class TestSystemdUnloadReload(StatuslineCase):
+    def test_unload_of_a_loaded_timer_with_no_files_still_reloads_the_daemon(self):
+        # T14: the timer is registered ("loaded") but its unit files were deleted by hand.
+        # Unloading it must still be followed by daemon-reload.
+        runner = FakeRunner(loaded=True)
+        rc, out, err = self.run_install("systemd", runner=runner, uninstall=True)
+        self.assertEqual(rc, 0, err)
+        self.assertFalse(os.path.exists(self.sd_dir))
+        self.assertEqual(runner.mutating(),
+                         [["systemctl", "--user", "disable", "--now", install.SYSTEMD_STEM + ".timer"],
+                          ["systemctl", "--user", "daemon-reload"]])
+
+
 if __name__ == "__main__":
     unittest.main()
