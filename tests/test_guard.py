@@ -18,8 +18,10 @@ PKG = os.path.join(REPO, "grid_fleet")
 
 # Top-level stdlib modules (3.9-era plus the ones this tool plausibly needs). Anything
 # else is a third-party dependency and fails. tomllib is deliberately absent (3.11+).
+# `_signal` is the builtin behind `signal`; limits.py (the statusLine tap) uses it for the
+# raw SIGPIPE number because importing `signal` costs ~3 ms of start-up on every refresh.
 STDLIB = frozenset("""
-__future__ abc argparse array ast atexit base64 binascii bisect builtins calendar codecs
+_signal __future__ abc argparse array ast atexit base64 binascii bisect builtins calendar codecs
 collections colorsys configparser contextlib copy csv ctypes curses dataclasses datetime
 decimal difflib email enum errno fcntl fnmatch functools getpass gettext glob grp gzip
 hashlib heapq hmac html http importlib inspect io ipaddress itertools json locale logging

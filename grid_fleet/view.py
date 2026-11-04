@@ -706,6 +706,27 @@ def run_loop(stdscr, config, api, env: Optional[Mapping[str, str]] = None) -> No
             pass
 
 
+def _wrapper_without_color(api, func, *args):
+    """curses.wrapper minus start_color(), for NO_COLOR.
+
+    curses.wrapper calls start_color() before our code can decide there is no colour, and
+    start_color() makes the terminal emit colour-initialisation codes. Setup and restore
+    otherwise mirror the stdlib wrapper exactly, including restoring the terminal
+    (keypad, echo, cbreak, endwin) when `func` raises.
+    """
+    stdscr = api.initscr()
+    try:
+        api.noecho()
+        api.cbreak()
+        stdscr.keypad(1)
+        return func(stdscr, *args)
+    finally:
+        stdscr.keypad(0)
+        api.echo()
+        api.nocbreak()
+        api.endwin()
+
+
 def view_main(config, args) -> int:
     if not (sys.stdin.isatty() and sys.stdout.isatty()):
         sys.stderr.write("grid-fleet view: needs an interactive terminal\n")
@@ -719,8 +740,12 @@ def view_main(config, args) -> int:
     except locale.Error:
         pass
     try:
-        # curses.wrapper restores the terminal (endwin) even when run_loop raises.
-        curses.wrapper(run_loop, config, curses)
+        # Both routes restore the terminal (endwin) even when run_loop raises. With
+        # NO_COLOR the stdlib wrapper is avoided because it would call start_color().
+        if use_color(os.environ):
+            curses.wrapper(run_loop, config, curses)
+        else:
+            _wrapper_without_color(curses, run_loop, config, curses)
     except KeyboardInterrupt:
         pass  # Ctrl-C is a normal way to quit
     return 0
