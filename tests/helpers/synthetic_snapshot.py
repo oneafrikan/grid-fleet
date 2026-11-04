@@ -4,6 +4,7 @@ Everything here is invented data (hosts like alpha / beta); nothing reads a real
 Claude tree or a real inbox. The hub tests and the render tests share it.
 
     make_snapshot(host, **overrides) -> dict      a full, valid schema-1 snapshot
+    make_limits / limit_window                    the snapshot `limits` section (task 7.4)
     NULL                                          pass as a section value to get JSON null
     write_inbox_file(state_dir, name, obj, mtime) write inbox/<name>.json, then os.utime
     snapshot_tree(state_dir)                      {relpath: (bytes, mtime_ns)} for read-only checks
@@ -42,6 +43,23 @@ def tokens_window(output=0, input=0, cache_creation=0, cache_read=0) -> dict:
         "cache_creation": cache_creation,
         "cache_read": cache_read,
     }
+
+
+def limit_window(used_pct, resets_at) -> dict:
+    """One limits window exactly as the snapshot-collect / limits-capture specs shape it."""
+    return {"used_pct": used_pct, "resets_at": resets_at}
+
+
+def make_limits(captured_at: int = COLLECTED_AT, five_hour=None, seven_day=None) -> dict:
+    """A snapshot `limits` section. A window left as None is omitted (each is independently
+    optional); pass limit_window(...) to include it. Pass the result as make_snapshot(limits=...).
+    """
+    out = {"captured_at": captured_at}
+    if five_hour is not None:
+        out["five_hour"] = five_hour
+    if seven_day is not None:
+        out["seven_day"] = seven_day
+    return out
 
 
 def make_snapshot(
