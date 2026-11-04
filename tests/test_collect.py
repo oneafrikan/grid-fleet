@@ -1029,6 +1029,21 @@ class TestLimitsSection(CollectBase):
             self.put(bad)
             self.assertIsNone(self.collect()["limits"], bad)
 
+    def test_huge_ints_in_the_file_do_not_crash_collect(self):
+        # F2: math.isfinite(10**400) raises OverflowError; a hand-edited file must yield
+        # limits: null (or drop just the bad window), never a traceback.
+        huge = 10 ** 400
+        self.put(json.dumps({"schema": 1, "captured_at": huge,
+                             "five_hour": {"used_pct": 1, "resets_at": NOW + 9}}))
+        self.assertIsNone(self.collect()["limits"])
+        self.put(json.dumps({"schema": 1, "captured_at": NOW,
+                             "five_hour": {"used_pct": huge, "resets_at": NOW + 9},
+                             "seven_day": {"used_pct": 2, "resets_at": NOW + 9}}))
+        self.assertEqual(self.collect()["limits"],
+                         {"captured_at": NOW, "seven_day": {"used_pct": 2, "resets_at": NOW + 9}})
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(snapshot.collect_main(self.config, None), 0)
+
     def test_unknown_fields_in_the_file_never_reach_the_snapshot(self):
         body = json.loads(json.dumps(self.GOOD))
         body["cwd"] = SYNTH_CWD

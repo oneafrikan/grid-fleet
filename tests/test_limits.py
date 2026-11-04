@@ -314,6 +314,53 @@ class TestSliceCapture(TapBase):
         self.assertEqual(self.state_listing(), ["limits.json"])
 
 
+class TestHostileNumbers(TapBase):
+    """F2: a value too big for a float must read as "not a number", never raise.
+
+    math.isfinite(10**400) raises OverflowError; unguarded, one hostile used_percentage
+    dropped the whole capture (including a valid seven_day) and, from a hand-edited
+    limits.json, crashed `collect` with a traceback.
+    """
+
+    HUGE = 10 ** 400
+
+    def test_is_number_rejects_huge_ints(self):
+        self.assertFalse(limits._is_number(self.HUGE))
+        self.assertFalse(limits._is_number(-self.HUGE))
+        self.assertTrue(limits._is_number(10 ** 15))
+
+    def test_huge_value_in_one_window_does_not_lose_the_other(self):
+        # json.dumps writes the big int as plain digits, which json.loads reads back as an int.
+        data = payload(five=(self.HUGE, NOW + 100), seven=(18.0, NOW + 1000))
+        self.tap(data)
+        body = self.read()
+        self.assertNotIn("five_hour", body)
+        self.assertEqual(body["seven_day"], {"used_pct": 18.0, "resets_at": NOW + 1000})
+
+    def test_huge_resets_at_is_rejected_too(self):
+        self.tap(payload(five=(1.0, self.HUGE), seven=(18.0, NOW + 1000)))
+        self.assertEqual(set(self.read()), {"schema", "captured_at", "seven_day"})
+
+    def test_hand_edited_file_with_huge_ints_reads_as_none_or_drops_the_window(self):
+        from grid_fleet import config as cfg
+        config = cfg.Config(state_dir=self.state)
+        os.makedirs(self.state)
+        cases = [
+            # captured_at unusable -> the whole file is unusable
+            ({"schema": 1, "captured_at": self.HUGE, "five_hour": {"used_pct": 1, "resets_at": NOW + 9}}, None),
+            # one window unusable -> only that window drops
+            ({"schema": 1, "captured_at": NOW, "five_hour": {"used_pct": self.HUGE, "resets_at": NOW + 9},
+              "seven_day": {"used_pct": 2, "resets_at": NOW + 9}},
+             {"captured_at": NOW, "seven_day": {"used_pct": 2, "resets_at": NOW + 9}}),
+            # the only window unusable -> no information -> None
+            ({"schema": 1, "captured_at": NOW, "five_hour": {"used_pct": 1, "resets_at": -self.HUGE}}, None),
+        ]
+        for body, expected in cases:
+            with open(self.limits_file, "w") as fh:
+                json.dump(body, fh)
+            self.assertEqual(limits.read_limits(config), expected, body)
+
+
 class TestPrivacy(TapBase):
     def test_no_identifying_payload_field_reaches_the_file(self):
         self.tap(payload(five=(42.0, NOW + 100), seven=(18.0, NOW + 1000)))

@@ -56,12 +56,18 @@ def limits_path(config) -> str:
 
 
 def _is_number(value: object) -> bool:
-    """A finite JSON number. bool is an int subclass, so exclude it explicitly."""
-    return (
-        isinstance(value, (int, float))
-        and not isinstance(value, bool)
-        and math.isfinite(value)
-    )
+    """A finite JSON number. bool is an int subclass, so exclude it explicitly.
+
+    An int too big for a float (about 1e308 and up) makes math.isfinite raise
+    OverflowError; such a value is hostile or corrupt, so it is "not a number"
+    rather than an exception that would drop the whole capture / crash collect.
+    """
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return False
+    try:
+        return math.isfinite(value)
+    except (OverflowError, ValueError):
+        return False
 
 
 def _clean_window(raw: object, name_in: str, name_out: str) -> Optional[dict]:
