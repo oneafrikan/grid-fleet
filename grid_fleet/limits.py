@@ -219,9 +219,16 @@ def _run_original(command: List[str], data: bytes) -> int:
     except OSError as exc:
         # Cannot even start it. Say so on stderr (strerror only: no paths) and
         # mimic the shell's exit code. Nothing on stdout.
-        sys.stderr.write("grid-fleet tap: cannot run original statusLine (%s)\n" % (exc.strerror or "error"))
+        # stderr may itself be closed (sys.stderr is None): then there is nobody to tell.
+        try:
+            sys.stderr.write("grid-fleet tap: cannot run original statusLine (%s)\n" % (exc.strerror or "error"))
+        except (AttributeError, OSError, ValueError):
+            pass
         return EXIT_ORIGINAL_UNAVAILABLE
     try:
+        # A closed stdout leaves sys.stdout as None (AttributeError below); a vanished
+        # reader gives OSError; a detached stream gives ValueError. All three mean "no
+        # one to print to": the exit code is still what matters.
         out = getattr(sys.stdout, "buffer", None)
         if out is not None:
             out.write(proc.stdout)
@@ -229,8 +236,8 @@ def _run_original(command: List[str], data: bytes) -> int:
         else:  # pragma: no cover - stdout without a binary layer
             sys.stdout.write(proc.stdout.decode("utf-8", "replace"))
             sys.stdout.flush()
-    except OSError:
-        pass  # reader went away; the exit code is still what matters
+    except (AttributeError, OSError, ValueError):
+        pass
     # A negative returncode means "killed by signal N": report it the way a shell would.
     return proc.returncode if proc.returncode >= 0 else 128 - proc.returncode
 

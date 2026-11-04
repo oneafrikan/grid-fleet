@@ -199,6 +199,35 @@ class TestTransparentChaining(TapBase):
         self.assertFalse(os.path.exists(os.path.join(self.work, "limits.json")))
 
 
+class TestClosedStdStreams(TapBase):
+    """F4: a closed stdout/stderr (sys.stdout is None) must not turn into a traceback."""
+
+    def tap_with_closed(self, closed, command, env=None):
+        # `>&-` / `2>&-` close the descriptor before python starts, so sys.stdout/stderr is None.
+        redirect = {"stdout": ">&-", "stderr": "2>&-"}[closed]
+        script = 'exec "$@" %s' % redirect
+        argv = ["/bin/sh", "-c", script, "sh", sys.executable, BIN, "tap", "--"] + command
+        return subprocess.run(argv, input=payload(five=(5.0, NOW + 10)), stdout=subprocess.PIPE,
+                              stderr=subprocess.PIPE, env=env or self.env(), cwd=self.work)
+
+    def test_closed_stdout_still_captures_and_returns_the_originals_code(self):
+        r = self.tap_with_closed("stdout", [sys.executable, "-c", "print('x'); raise SystemExit(3)"])
+        self.assertEqual(r.returncode, 3)
+        self.assertEqual(r.stderr, b"")  # no AttributeError traceback
+        self.assertIn("five_hour", self.read())
+
+    def test_closed_stdout_with_original_that_succeeds(self):
+        r = self.tap_with_closed("stdout", ["true"])
+        self.assertEqual((r.returncode, r.stderr), (0, b""))
+
+    def test_closed_stderr_with_unstartable_original(self):
+        # The 127 path writes a message to stderr; with stderr gone it must still return 127.
+        r = self.tap_with_closed("stderr", [os.path.join(self.work, "no-such-command")])
+        self.assertEqual(r.returncode, 127)
+        self.assertEqual(r.stdout, b"")
+        self.assertIn("five_hour", self.read())
+
+
 class TestSliceCapture(TapBase):
     def test_both_windows_present(self):
         # Scenario: Both windows present -> both windows, nothing else from the payload.
