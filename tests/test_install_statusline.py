@@ -565,7 +565,7 @@ class TestRestoreOnUninstall(StatuslineCase):
 
     def test_plain_uninstall_does_timers_and_statusline_with_one_confirmation(self):
         before = self.write_settings()
-        self.run_install("launchd", apply=True)
+        self.run_install("launchd", apply=True, hub="hub-alias")
         self.sl()
         self.runner.calls.clear()
         rc, out, err = self.uninstall()
@@ -577,7 +577,7 @@ class TestRestoreOnUninstall(StatuslineCase):
         self.assertIn("before:", out)  # the restore diff is shown before the question
 
     def test_statusline_only_uninstall_leaves_timers_alone(self):
-        self.run_install("launchd", apply=True)
+        self.run_install("launchd", apply=True, hub="hub-alias")
         self.write_settings()
         self.sl()
         self.runner.calls.clear()
@@ -588,7 +588,7 @@ class TestRestoreOnUninstall(StatuslineCase):
 
     def test_declined_or_non_tty_uninstall_changes_nothing(self):
         self.write_settings()
-        self.run_install("launchd", apply=True)
+        self.run_install("launchd", apply=True, hub="hub-alias")
         self.sl()
         wrapped = _readb(self.settings)
         rc, out, _ = self.uninstall(answer="n")
@@ -629,7 +629,7 @@ class TestRestoreOnUninstall(StatuslineCase):
 
     def test_refused_restore_still_removes_the_timers_but_exits_nonzero(self):
         self.write_settings(text="{broken")
-        self.run_install("launchd", apply=True)
+        self.run_install("launchd", apply=True, hub="hub-alias")
         rc, out, _ = self.uninstall()
         self.assertNotEqual(rc, 0)
         self.assertFalse(os.path.lexists(self.plist))
@@ -657,13 +657,14 @@ class TestNeverSilent(StatuslineCase):
     def test_other_install_modes_do_not_touch_settings(self):
         before = self.write_settings()
         self.run_install("launchd")                              # plan
-        self.run_install("launchd", apply=True)                  # timers apply
-        self.run_install("systemd", apply=True)
-        self.run_install("launchd", apply=True, answer="n")
-        self.run_install("launchd", tty=False, apply=True)
+        self.run_install("launchd", apply=True, hub="hub-alias")  # timers apply
+        self.run_install("systemd", apply=True, hub="hub-alias")
+        self.run_install("launchd", apply=True, hub="hub-alias", answer="n")
+        self.run_install("launchd", tty=False, apply=True, hub="hub-alias")
         self.assertEqual(_readb(self.settings), before)
         self.assertEqual(self.backups(), [])
-        self.assertFalse(os.path.exists(self.cfg_path))
+        # The timer apply writes interval_s/hub/account (and nothing statusLine related).
+        self.assertNotIn("statusline_original", json.loads(_read(self.cfg_path)))
 
     def test_only_install_py_knows_about_settings_json(self):
         pkg = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),

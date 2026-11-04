@@ -21,11 +21,16 @@ statusLine tap (`install --statusline`, task 8.3)
   code path that ever writes settings.json, and only after printing the exact
   before/after, a TTY and a "y". See the "statusLine" section below.
 
-What it deliberately does NOT do
---------------------------------
-  Writing hub/account into the config file is not done here: `--interval`
-  only affects the timer (see the mismatch warning in `_warnings`). The one config
-  key install writes is `statusline_original`.
+Config keys install writes (`install` without --statusline/--uninstall)
+-----------------------------------------------------------------------
+  `interval_s`, `hub` and `account` are written into grid-fleet's own config file by
+  `install --apply`, so the timer interval and the hub's staleness maths (which reads
+  `interval_s`) can never disagree, and the first tick already pushes to the right hub.
+  Values come from --interval / --hub / --account, falling back to what the config
+  already holds. `--apply` REFUSES when no hub is known, because every push would fail.
+  The rest of the file (other keys, unknown keys, key order, layout) is preserved.
+  `--uninstall` and `--statusline` never write these three keys; `--uninstall` leaves
+  them in place on purpose (they are the user's settings, harmless without the timer).
 
 Safety model
 ------------
@@ -53,6 +58,7 @@ import time
 from typing import Callable, List, Mapping, Optional, Sequence, Tuple
 
 from grid_fleet import config as cfg
+from grid_fleet import push
 
 # Reverse-DNS style label for the launchd job; also the file stem on macOS.
 LAUNCHD_LABEL = "io.grid-fleet.timer"
@@ -267,16 +273,16 @@ def command_plan(kind: str, uid: int, paths: Sequence[str]) -> List[List[str]]:
             ["systemctl", "--user", "enable", "--now", SYSTEMD_STEM + ".timer"]]
 
 
-def _warnings(config, interval_s: int, explicit_interval: bool) -> List[str]:
-    out = []
-    if config.hub is None:
-        out.append("warning: config has no `hub`; `push` will fail each tick until it is set (%s)"
-                   % config.config_path)
-    if explicit_interval and interval_s != config.interval_s:
-        out.append("warning: --interval %d differs from config interval_s %d; set interval_s to "
-                   "%d in %s so the hub's staleness maths matches (install does not edit config)"
-                   % (interval_s, config.interval_s, interval_s, config.config_path))
-    return out
+def _warnings(config_path: str, hub: Optional[str], hub_problem: Optional[str]) -> List[str]:
+    """Plan warnings. `hub_problem` is None when `hub` is usable. (There is no longer an
+    interval-mismatch warning: --apply now writes interval_s into the config, so the two
+    cannot disagree; the plan shows that change instead.)"""
+    if hub is None:
+        return ["warning: no hub: pass --hub ALIAS (or `local`) or set `hub` in %s; --apply "
+                "refuses without one, and push would fail every tick" % config_path]
+    if hub_problem is not None:
+        return ["warning: hub %s is not usable (%s); pass a valid --hub" % (json.dumps(hub), hub_problem)]
+    return []
 
 
 def log_hint(kind: str, log_path: str) -> str:
@@ -288,7 +294,8 @@ def log_hint(kind: str, log_path: str) -> str:
 
 def render_plan(kind: str, interval_s: int, python: str, script: str, path_env: str,
                 entries: Sequence[Tuple[str, str]], commands: Sequence[Sequence[str]],
-                warnings: Sequence[str], log_path: str = "") -> str:
+                warnings: Sequence[str], log_path: str = "",
+                config_lines: Sequence[str] = ()) -> str:
     """Human plan text. Deterministic: depends only on its arguments."""
     lines = ["grid-fleet install plan (%s)" % ("macOS, launchd" if kind == "launchd"
                                                else "Linux, systemd --user"),
@@ -297,8 +304,9 @@ def render_plan(kind: str, interval_s: int, python: str, script: str, path_env: 
              "  script:   %s" % script,
              "  PATH:     %s" % path_env,
              "  each tick: collect, then push",
-             "  " + log_hint(kind, log_path),
-             "files:"]
+             "  " + log_hint(kind, log_path)]
+    lines.extend(config_lines)
+    lines.append("files:")
     for state, path in entries:
         lines.append("  %-9s %s" % (state, path))
     lines.append("commands (unload/restart steps run only when updating an existing install):")
@@ -909,6 +917,133 @@ def _statusline_install(config, env, python, script, is_tty, prompt) -> int:
     return EXIT_OK
 
 
+# --- config keys (interval_s, hub, account) ---------------------------------------------------
+#
+# Flow for `install --apply`:  plan the config edit (read-only) -> print before/after ->
+# refuse if no hub -> TTY + "y" -> write config ATOMICALLY -> only then load the timer.
+# Config goes first so the very first tick (launchd RunAtLoad, systemd OnActiveSec) already
+# sees the right hub. Everything up to the confirmation is read-only.
+
+CONFIG_KEYS = ("interval_s", "hub", "account")
+_ABSENT = object()  # "key not in the file", distinct from any JSON value (incl. null)
+
+# Account label rules. The hub shows the label as printable ASCII, at most 32 chars, and
+# falls back to "default" for an empty one (hub._account_label); install refuses anything
+# the hub would have to rewrite, so what is stored is what is displayed. Kept as local
+# constants (not imported from hub) so the installer does not depend on hub internals.
+ACCOUNT_LABEL_MAX = 32
+
+# One planned config edit. `raw` is the file's bytes when it existed (None = will be
+# created); `new_text` is only meaningful when `changed`.
+ConfigEdit = collections.namedtuple(
+    "ConfigEdit", "path raw created changed before after new_data style mode new_text note")
+
+
+def validate_account(value: object) -> Optional[str]:
+    """None if `value` is an account label the hub shows unchanged, else the reason."""
+    if not isinstance(value, str) or not value:
+        return "must be a non-empty label"
+    if value != value.strip():
+        return "must not start or end with whitespace"
+    if any(not (" " <= c <= "~") for c in value):
+        return "may only contain printable ASCII"
+    if len(value) > ACCOUNT_LABEL_MAX:
+        return "must be at most %d characters" % ACCOUNT_LABEL_MAX
+    return None
+
+
+def _same_value(a, b) -> bool:
+    """Equality that does not treat True as 1 (config values are strictly typed)."""
+    return type(a) is type(b) and a == b
+
+
+def _show_value(value) -> str:
+    return "(absent)" if value is _ABSENT else json.dumps(value)
+
+
+def plan_config_edit(config, interval_s: int, hub: str, account: str) -> ConfigEdit:
+    """Decide what `install --apply` would do to the config file. Read-only.
+
+    Raises InstallError (file untouched) for an unreadable / invalid-JSON / non-object file
+    or an unknown `schema`: the file is the user's and we do not guess at its meaning.
+    An existing file keeps every other key (known or unknown), key order and, when it can
+    be reproduced, its exact layout; the three keys are replaced in place or appended in
+    the order interval_s, hub, account. A missing file is created with schema, host_name
+    (config.host_name, i.e. derived exactly as collect derives it) and the three keys.
+    host_name is NOT added to an existing file: collect already derives it at load time.
+    """
+    path = config.config_path
+    desired = {"interval_s": interval_s, "hub": hub, "account": account}
+    if os.path.lexists(path):
+        raw, data = _read_json_object(path, "config file")
+        schema = data.get("schema")
+        if isinstance(schema, bool) or schema != cfg.SCHEMA:  # True == 1 in Python
+            raise InstallError("config file %s has unsupported schema %r (expected %d); "
+                               "left untouched" % (path, schema, cfg.SCHEMA))
+        style, exact = _pick_style(data, raw.decode("utf-8"))
+        mode, created = _mode_of(path), False
+    else:
+        raw, created, exact = None, True, True
+        data = {"schema": cfg.SCHEMA, "host_name": config.host_name}
+        style, mode = (2, False, "\n"), 0o600  # private: a fresh file is 0600
+    before = {k: data.get(k, _ABSENT) for k in CONFIG_KEYS}
+    changed = created or not all(_same_value(before[k], desired[k]) for k in CONFIG_KEYS)
+    new_data = dict(data)  # a dict keeps order: existing keys stay put, new ones append
+    new_data.update(desired)
+    new_text, note = "", ""
+    if changed:
+        new_text, note = _render(new_data, style, exact, path)
+    return ConfigEdit(path, raw, created, changed, before, desired, new_data, style, mode,
+                      new_text, note)
+
+
+def config_plan_lines(edit: ConfigEdit) -> List[str]:
+    """The 'config:' block of the plan: exact before/after of just the three keys."""
+    state = ("will be created" if edit.created
+             else "will be updated" if edit.changed else "unchanged")
+    lines = ["config: %s (%s)" % (edit.path, state)]
+    for key in CONFIG_KEYS:
+        old, new = edit.before[key], edit.after[key]
+        if _same_value(old, new):
+            lines.append("  %-10s %s (unchanged)" % (key, _show_value(new)))
+        else:
+            lines.append("  %-10s %s -> %s" % (key, _show_value(old), _show_value(new)))
+    if edit.changed:
+        lines.append("  all other config keys: unchanged")
+        if edit.note:
+            lines.append("  " + edit.note)
+    return lines
+
+
+def _apply_config_edit(edit: ConfigEdit) -> None:
+    """Write a planned config edit atomically. Raises InstallError / OSError.
+
+    The file may have been edited while we waited for the "y"; if its bytes changed since
+    the plan, stop and write nothing (same rule as the settings.json edit).
+    """
+    if edit.created:
+        if os.path.lexists(edit.path):
+            raise InstallError("config file %s appeared while waiting for confirmation; "
+                               "nothing was changed, re-run" % edit.path)
+    else:
+        try:
+            with open(edit.path, "rb") as fh:
+                still = fh.read()
+        except OSError as exc:
+            raise InstallError("cannot re-read %s: %s" % (edit.path, exc.strerror or exc))
+        if still != edit.raw:
+            raise InstallError("config file %s changed while waiting for confirmation; "
+                               "nothing was changed, re-run" % edit.path)
+    # A config dir this tool has to create is private (0700); an existing dir is never
+    # chmod-ed. Resolved through symlinks, like the write, so a dotfile-managed link works.
+    _makedirs_private(os.path.dirname(os.path.realpath(edit.path)))
+    try:
+        # _write_atomic: temp file in the same dir + os.replace, so a failure leaves the old file.
+        _write_json_file(edit.path, edit.new_data, edit.style, edit.mode)
+    except ValueError as exc:  # e.g. text that cannot be encoded as UTF-8
+        raise InstallError("config file %s cannot be written, left untouched: %s" % (edit.path, exc))
+
+
 # --- CLI ---------------------------------------------------------------------------------
 
 
@@ -923,11 +1058,33 @@ def _interval_arg(raw: str) -> int:
     return val
 
 
+def _hub_arg(raw: str) -> str:
+    # The SAME validator push uses before it hands the alias to ssh ("local" passes it).
+    reason = push.validate_hub(raw)
+    if reason is not None:
+        raise argparse.ArgumentTypeError("invalid hub %r: %s" % (raw, reason))
+    return raw
+
+
+def _account_arg(raw: str) -> str:
+    reason = validate_account(raw)
+    if reason is not None:
+        raise argparse.ArgumentTypeError("invalid account %r: %s" % (raw, reason))
+    return raw
+
+
 def add_arguments(parser) -> None:
     """Declare install's own flags (called by cli.py for `install` only)."""
     parser.add_argument("--interval", type=_interval_arg, default=None, metavar="SECONDS",
-                        help="timer interval: one of %s (default: config interval_s)"
-                        % ", ".join(map(str, cfg.ALLOWED_INTERVALS)))
+                        help="timer interval: one of %s; written to config as interval_s "
+                        "(default: config interval_s, else %d)"
+                        % (", ".join(map(str, cfg.ALLOWED_INTERVALS)), cfg.DEFAULT_INTERVAL_S))
+    parser.add_argument("--hub", type=_hub_arg, default=None, metavar="ALIAS",
+                        help="ssh host alias of the hub, or `local`; written to config as "
+                        "hub. --apply refuses when neither this nor a config hub exists")
+    parser.add_argument("--account", type=_account_arg, default=None, metavar="LABEL",
+                        help="account label for the limits strip; written to config as "
+                        "account (default: config account, else %s)" % cfg.DEFAULT_ACCOUNT)
     parser.add_argument("--apply", action="store_true",
                         help="perform the plan after an interactive y/N (default: print only)")
     parser.add_argument("--statusline", action="store_true",
@@ -958,6 +1115,16 @@ def install_main(config, args, *, runner: Optional[Runner] = None,
     uid = os.getuid() if uid is None else uid
 
     explicit = getattr(args, "interval", None)
+    explicit_hub = getattr(args, "hub", None)
+    explicit_account = getattr(args, "account", None)
+    uninstall = bool(getattr(args, "uninstall", False))
+    if (getattr(args, "statusline", False) or uninstall) and (
+            explicit_hub is not None or explicit_account is not None):
+        # --statusline and --uninstall never write hub/account; accepting the flags and
+        # ignoring them would look like they had been applied.
+        sys.stderr.write("grid-fleet install: --hub and --account only apply to the timer "
+                         "install, not to --statusline or --uninstall\n")
+        return EXIT_USAGE
     if getattr(args, "statusline", False):
         return _statusline_main(config, args, explicit, env, runner, python, script, uid,
                                 is_tty, prompt)
@@ -966,6 +1133,13 @@ def install_main(config, args, *, runner: Optional[Runner] = None,
         sys.stderr.write("grid-fleet install: interval must be one of %s (got %r)\n"
                          % (", ".join(map(str, cfg.ALLOWED_INTERVALS)), interval_s))
         return EXIT_USAGE
+    # Programmatic callers bypass argparse, so re-check the flag values here.
+    for flag, value, check in (("--hub", explicit_hub, push.validate_hub),
+                               ("--account", explicit_account, validate_account)):
+        reason = check(value) if value is not None else None
+        if reason is not None:
+            sys.stderr.write("grid-fleet install: invalid %s %r: %s\n" % (flag, value, reason))
+            return EXIT_USAGE
     try:
         kind = system_kind(platform if platform is not None else sys.platform)
         if not python or not os.path.isabs(python) or not os.path.isabs(script):
@@ -982,21 +1156,54 @@ def install_main(config, args, *, runner: Optional[Runner] = None,
     paths = [p for p, _t in files]
     entries = [(file_state(p, t), p, t) for p, t in files]
     mode_change = bool(getattr(args, "apply", False))
-    uninstall = bool(getattr(args, "uninstall", False))
 
     if uninstall:
+        # NOTE: uninstall deliberately leaves interval_s / hub / account in the config.
+        # They are the user's settings (and harmless without a timer); only the files
+        # install created and the saved statusLine are undone.
         sl = plan_statusline_restore(settings_path(config, env), _saved_original(config))
         return _run_uninstall(kind, paths, uid, runner, is_tty, prompt, sl, config.config_path)
 
+    # Effective config values: the flag wins, else what the config already holds.
+    hub = explicit_hub if explicit_hub is not None else config.hub
+    account = explicit_account if explicit_account is not None else config.account
+    account_problem = validate_account(account)
+    if account_problem is not None:  # a bad value already stored in the config
+        sys.stderr.write("grid-fleet install: config account %r is not usable (%s); pass a "
+                         "valid --account\n" % (account, account_problem))
+        return EXIT_USAGE
+    hub_problem = push.validate_hub(hub) if hub is not None else None
+    # Read-only: decides what would be written. A config we must not touch (invalid JSON,
+    # unknown schema) stops everything here, in plan mode too, so the plan is never a lie.
+    cfg_edit = None
+    if hub is not None and hub_problem is None:
+        try:
+            cfg_edit = plan_config_edit(config, interval_s, hub, account)
+        except InstallError as exc:
+            sys.stderr.write("grid-fleet install: %s\n" % exc)
+            return EXIT_REFUSED
+
     plan = render_plan(kind, interval_s, python, script, path_env,
                        [(s, p) for s, p, _t in entries], command_plan(kind, uid, paths),
-                       _warnings(config, interval_s, explicit is not None), log_path)
+                       _warnings(config.config_path, hub, hub_problem), log_path,
+                       config_plan_lines(cfg_edit) if cfg_edit is not None else ())
     sys.stdout.write(plan)
     if not mode_change:
         sys.stdout.write("plan only: nothing was changed. Re-run with --apply to install.\n")
         return EXIT_OK
 
-    # Apply from here. Non-TTY first: spec says print plan, exit non-zero, modify nothing.
+    # Apply from here. No usable hub comes first, before the TTY check: without a hub every
+    # push tick would fail, so installing the timer is never what the user wants.
+    if cfg_edit is None:
+        if hub is None:
+            sys.stderr.write("grid-fleet install: --apply needs a hub: pass --hub ALIAS (or "
+                             "`local`) or set the `hub` key in %s; nothing was changed\n"
+                             % config.config_path)
+        else:
+            sys.stderr.write("grid-fleet install: hub %s is not usable (%s); pass a valid "
+                             "--hub; nothing was changed\n" % (json.dumps(hub), hub_problem))
+        return EXIT_REFUSED
+    # Non-TTY next: spec says print plan, exit non-zero, modify nothing.
     if not is_tty():
         sys.stderr.write("grid-fleet install: --apply needs an interactive terminal to "
                          "confirm; nothing was changed\n")
@@ -1008,17 +1215,25 @@ def install_main(config, args, *, runner: Optional[Runner] = None,
                              "grid-fleet); move it aside first\n" % (p, s))
         return EXIT_REFUSED
     loaded = _is_loaded(kind, uid, runner)
-    if loaded and all(s == "unchanged" for s, _p, _t in entries):
+    timer_current = loaded and all(s == "unchanged" for s, _p, _t in entries)
+    if timer_current and not cfg_edit.changed:
         sys.stdout.write("nothing to change\n")  # second run with the same inputs
         return EXIT_OK
     if not _confirm(prompt):
         sys.stdout.write("declined: nothing was changed\n")
         return EXIT_REFUSED
+    # Config BEFORE the timer: the first tick (which can fire as soon as the timer is
+    # loaded) must already see the right hub and interval_s.
     try:
-        _apply(kind, entries, uid, runner, config.state_dir, loaded)
+        if cfg_edit.changed:
+            _apply_config_edit(cfg_edit)
+        if not timer_current:
+            _apply(kind, entries, uid, runner, config.state_dir, loaded)
     except (InstallError, OSError) as exc:
         sys.stderr.write("grid-fleet install: %s\n" % exc)
         return EXIT_REFUSED
+    if cfg_edit.changed:
+        sys.stdout.write("config written: %s\n" % cfg_edit.path)
     sys.stdout.write("installed\n%s\n" % log_hint(kind, log_path))
     if kind == "systemd":
         sys.stdout.write(LINGER_NOTE + "\n")
