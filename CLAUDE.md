@@ -4,7 +4,7 @@
 
 `grid-fleet`: terminal dashboard (Python, stdlib only) for Claude Code sessions, tokens,
 subagent usage and Max-plan limits across a fleet of machines.
-Status: spec approved (`openspec/changes/fleet-tracer-bullet/`). Groups 1-8 built (tracer bullet, leaderboard and sparkline, limits strip, installers); Groups 1-4 QA-verified, QA and security-gate results for 6-8 pending merge. Group 5 and the other HUMAN checkpoints are pending; Group 9 (docs) in progress.
+Status: spec approved (`openspec/changes/fleet-tracer-bullet/`). Groups 1-8 built and independently QA'd (tracer bullet, leaderboard and sparkline, limits strip, installers); security gate GO. Group 5 is signed off. Pending: real-machine timer and statusLine verification (8.1, 8.5) and the public-readiness gate (9.3). Group 9 (docs) in progress.
 
 ## Hard constraints
 
@@ -43,8 +43,8 @@ Status: spec approved (`openspec/changes/fleet-tracer-bullet/`). Groups 1-8 buil
 ## Build order
 
 1. Groups 1-4 in `tasks.md` (tracer bullet: skeleton, collect, push, minimal view): done.
-2. Group 5 is a HUMAN checkpoint (not formally ticked).
-3. Groups 6-8 (leaderboard, limits, installers): built. Group 9 (docs): in progress. Tasks marked `HUMAN:` are for the human only.
+2. Group 5 is a HUMAN checkpoint: signed off by the maintainer (5.1, 5.2 ticked).
+3. Groups 6-8 (leaderboard, limits, installers): built and QA'd. Group 9 (docs): in progress. Tasks marked `HUMAN:` are for the human only.
 
 Intended specialist agents (the-grid names):
 

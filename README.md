@@ -2,7 +2,7 @@
 
 A btop-style terminal dashboard for your Claude Code sessions across all your machines.
 
-**Status: pre-alpha. The tracer bullet (collect, push, view) and Groups 6-8 (subagent leaderboard and sparkline, limits strip, timer and statusLine installers) are built. Independent QA results for Groups 6-8 are being merged. Still pending: the real-machine tracer-bullet checkpoint, a real-machine run of `install --apply` and `install --statusline` (timers across sleep are not yet verified on real machines), and the public-readiness gate.**
+**Status: pre-alpha. Groups 1-8 are built and independently QA'd: the tracer bullet (collect, push, view), the subagent leaderboard and sparkline, the limits strip, and the timer and statusLine installers. The security review gate is GO. Still pending: real-machine verification of the timers across sleep and of `install --apply` and `install --statusline` (tasks 8.1, 8.5), and the public-readiness gate (9.3).**
 The plan is in [`openspec/changes/fleet-tracer-bullet/`](openspec/changes/fleet-tracer-bullet/).
 
 ## What it is
