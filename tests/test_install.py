@@ -274,6 +274,24 @@ class TestMacos(InstallCase):
         self.assertIn(["launchctl", "bootstrap", "gui/%d" % UID, self.plist], self.runner.calls)
         self.assertTrue(self.runner.loaded)
 
+    def test_state_dir_created_by_install_is_private(self):
+        # S4: the state dir will hold snapshots and the inbox; install creates it 0700, and so
+        # every parent it had to create on the way (not just the leaf).
+        deep = os.path.join(self.work, "newparent", "state")
+        conf = cfg.Config(hub="hub-alias", interval_s=600, config_path="/synth/config.json",
+                          state_dir=deep)
+        rc, _, err = self.run_install("launchd", config=conf, apply=True)
+        self.assertEqual(rc, 0, err)
+        for d in (deep, os.path.dirname(deep)):
+            self.assertEqual(os.stat(d).st_mode & 0o777, 0o700, d)
+
+    def test_existing_state_dir_mode_is_left_alone(self):
+        os.makedirs(self.state)
+        os.chmod(self.state, 0o755)
+        rc, _, err = self.run_install("launchd", apply=True)
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(os.stat(self.state).st_mode & 0o777, 0o755)
+
     def test_interval_option_is_used(self):
         self.run_install("launchd", apply=True, interval=900)
         self.assertEqual(plistlib.loads(_readb(self.plist))["StartInterval"], 900)

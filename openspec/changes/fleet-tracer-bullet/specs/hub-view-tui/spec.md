@@ -35,7 +35,7 @@ The view SHALL show for each host the busy and waiting session counts and output
 - **THEN** the total sums the known values and appends `+` (for example `2+`), and is `unknown` if no fresh host reported that figure
 
 ### Requirement: Staleness
-A host is stale when the age of its inbox file, measured on the hub clock, exceeds twice the snapshot `interval_s`. Stale hosts SHALL render as grey `unknown` with their age, and SHALL be excluded from totals, with the footer stating how many hosts are fresh.
+A host is stale when the age of its inbox file, measured on the hub clock, exceeds twice the snapshot `interval_s`, where an `interval_s` above 3600 is treated as 3600 (the installer only allows 300, 600 or 900). Stale hosts SHALL render as grey `unknown` with their age, and SHALL be excluded from totals, with the footer stating how many hosts are fresh.
 
 #### Scenario: Stale host
 - **WHEN** a host's inbox file is 41 minutes old and its `interval_s` is 600
@@ -57,7 +57,7 @@ The view SHALL show the top 8 agent types by invocations over 7 days, summed acr
 - **THEN** the leaderboard shows 10
 
 ### Requirement: Limits shown once per account
-The view SHALL show the 5-hour and 7-day limit bars once per `account`, taken per window from the snapshot with the greatest `limits.captured_at`, annotated with the capture age. A window whose `resets_at` has passed MUST render as `unknown`. An absent window MUST render as `unknown`, not 0 percent.
+The view SHALL show the 5-hour and 7-day limit bars once per `account`, taken per window from the snapshot with the greatest `limits.captured_at`, annotated with the capture age. A window whose `resets_at` has passed MUST render as `unknown`. An absent window MUST render as `unknown`, not 0 percent. A snapshot whose `limits.captured_at` is more than 5 minutes ahead of the hub clock MUST be ignored for limits, so a future-dated capture cannot win permanently.
 
 #### Scenario: Three hosts, one account
 - **WHEN** three fresh hosts share account `default` and report different `captured_at`
@@ -76,7 +76,7 @@ The view SHALL show the 5-hour and 7-day limit bars once per `account`, taken pe
 - **THEN** a limits block is shown for each
 
 ### Requirement: Bad input tolerated
-The view SHALL ignore dotfiles, files larger than 256 KiB, invalid JSON and snapshots with an unknown `schema`, and SHALL report the number skipped in the footer.
+The view SHALL ignore dotfiles, files larger than 256 KiB, invalid JSON and snapshots with an unknown `schema`, and SHALL report the number skipped in the footer. It SHALL read at most 512 inbox files per scan, in name order, and count the rest as skipped.
 
 #### Scenario: Corrupt file
 - **WHEN** the inbox holds one valid and one corrupt file

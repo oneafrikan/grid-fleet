@@ -20,6 +20,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -123,18 +124,25 @@ class TestPushOverSsh(PushBase):
         self.store_snapshot()
         self.run_push()
         (argv,) = self.ssh.calls()
-        # Exact shape: options, alias, ONE remote-command word.
-        self.assertEqual(argv[:4], ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10"])
-        self.assertEqual(argv[4], ALIAS)
-        self.assertEqual(len(argv), 6)
+        # Exact shape: options, "--", alias, ONE remote-command word. ClearAllForwardings
+        # stops a user's ssh config from opening port/agent/X11 forwards for this one-shot
+        # upload; "--" means the alias can never be parsed as an option.
+        self.assertEqual(argv[:6], ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
+                                    "-o", "ClearAllForwardings=yes"])
+        self.assertEqual(argv[6], "--")
+        self.assertEqual(argv[7], ALIAS)
+        self.assertEqual(len(argv), 9)
+        argv = argv[:5] + [argv[8]]  # the checks below index the remote-command word as argv[5]
         self.assertTrue(argv[5].startswith("sh -c '"))
         self.assertTrue(argv[5].endswith("'"))
         self.assertNotIn("\n", argv[5])
-        # The upload script from design.md, with H = the host name: tmp file, completeness
-        # check (last byte must be a newline), then the atomic rename.
-        self.assertIn('mkdir -p "$d" && cat > "$d/.alpha.json.tmp" && '
-                      '[ "$(tail -c 1 "$d/.alpha.json.tmp" | wc -l)" -eq 1 ] && '
-                      'mv "$d/.alpha.json.tmp" "$d/alpha.json"', argv[5])
+        # The upload script from design.md, with H = the host name: a per-push unique tmp
+        # file (PID in the name) removed on exit, completeness check (last byte must be a
+        # newline), then the atomic rename.
+        self.assertIn('t="$d/.alpha.json.$$.tmp"; c() { rm -f "$t"; }; trap c EXIT; '
+                      'mkdir -p "$d" && cat > "$t" && '
+                      '[ "$(tail -c 1 "$t" | wc -l)" -eq 1 ] && '
+                      'mv "$t" "$d/alpha.json"', argv[5])
         self.assertIn("umask 077", argv[5])
 
     def test_hub_unreachable(self):
@@ -189,7 +197,9 @@ class TestPushOverSsh(PushBase):
     def test_ssh_timeout_is_a_failure_not_a_hang(self):
         data = self.store_snapshot()
         self.ssh.set_mode("hang")
-        with mock.patch.object(push, "SSH_TIMEOUT_S", 1):
+        # 3 s, not 1: under load the fake ssh script can need >1 s just to start and record its
+        # argv, which made `calls()` empty and the test flaky.
+        with mock.patch.object(push, "SSH_TIMEOUT_S", 3):
             rc, _, err = self.run_push()
         self.assertNotEqual(rc, 0)
         self.assertIn("timeout", err)
@@ -237,7 +247,10 @@ class TestHubNotConfigured(PushBase):
 
     def test_hostile_hub_aliases_are_refused(self):
         # Option injection into ssh, and whitespace/control characters.
-        for bad in ("-oProxyCommand=touch /nope", "-J", "", "a b", "a\tb", "a\nb", "a\x00b", " hub", "hub "):
+        for bad in ("-oProxyCommand=touch /nope", "-J", "", "a b", "a\tb", "a\nb", "a\x00b", " hub", "hub ", "hub\n",
+                    # S6: outside the conservative charset [A-Za-z0-9._@:-]
+                    "a;b", "a'b", 'a"b', "a$(id)", "a`id`", "a|b", "a&b", "a/b", "a\\b", "a%h",
+                    "a=b", "a,b", "a*", "~", "h\u00e9", "a\x7fb", "-", "--", "-x"):
             config = dataclasses.replace(self.config, hub=bad)
             rc, _, err = self.run_push(config)
             self.assertNotEqual(rc, 0, repr(bad))
@@ -246,7 +259,8 @@ class TestHubNotConfigured(PushBase):
             self.assert_nothing_ran()
 
     def test_plain_aliases_are_accepted(self):
-        for ok in ("hub-alias", "user@host.example", "h_1", "local"):
+        for ok in ("hub-alias", "user@host.example", "h_1", "local", "a.b.example", "10.0.0.5",
+                   "fe80::1", "User_1@host-2.example", "a-", "x"):
             self.assertIsNone(push.validate_hub(ok), ok)
 
 
@@ -264,8 +278,12 @@ class TestAtomicDelivery(PushBase):
         rc, _, err = self.run_push()
         self.assertNotEqual(rc, 0)
         self.assertEqual(self.ssh.read_inbox("alpha"), self.OLD)
-        self.assertEqual(self.ssh.inbox_files(), [".alpha.json.tmp", "alpha.json"])
-        with open(os.path.join(self.ssh.inbox_dir(), ".alpha.json.tmp"), "rb") as fh:
+        # SIGKILL skips the script's exit trap, so the partial upload stays behind, but only
+        # in a unique dot-prefixed file readers ignore.
+        tmps = [n for n in self.ssh.inbox_files() if n != "alpha.json"]
+        self.assertEqual(len(tmps), 1, tmps)
+        self.assertRegex(tmps[0], r"^\.alpha\.json\.[0-9]+\.tmp$")
+        with open(os.path.join(self.ssh.inbox_dir(), tmps[0]), "rb") as fh:
             partial = fh.read()
         self.assertEqual(partial, data[:10])
         self.assertEqual(len(self.ssh.calls()), 1)
@@ -312,10 +330,8 @@ class TestAtomicDelivery(PushBase):
         rc, _, _ = self.run_push()
         self.assertNotEqual(rc, 0)
         self.assertEqual(self.ssh.read_inbox("alpha"), self.OLD)
-        # The partial bytes sit only in the dot-prefixed tmp file readers ignore.
-        self.assertEqual(self.ssh.inbox_files(), [".alpha.json.tmp", "alpha.json"])
-        with open(os.path.join(self.ssh.inbox_dir(), ".alpha.json.tmp"), "rb") as fh:
-            self.assertEqual(fh.read(), data[:10])
+        # The script ran to its end, so its exit trap removed the partial tmp file.
+        self.assertEqual(self.ssh.inbox_files(), ["alpha.json"])
 
     def test_zero_byte_stream_is_not_renamed(self):
         self.store_snapshot()
@@ -323,7 +339,7 @@ class TestAtomicDelivery(PushBase):
         self.ssh.set_mode("die", after=0)
         self.run_push()
         self.assertEqual(self.ssh.read_inbox("alpha"), self.OLD)
-        self.assertEqual(self.ssh.inbox_files(), [".alpha.json.tmp", "alpha.json"])
+        self.assertEqual(self.ssh.inbox_files(), ["alpha.json"])  # empty tmp cleaned up
 
     def test_zero_byte_stream_with_no_previous_file_creates_no_final_file(self):
         self.store_snapshot()
@@ -363,8 +379,123 @@ class TestAtomicDelivery(PushBase):
 
     def test_partial_data_only_in_dot_prefixed_tmp_name(self):
         # Whatever happens, the in-flight name is a dot-file readers ignore.
-        self.assertIn('.alpha.json.tmp', push.remote_command("alpha"))
+        self.assertIn('.alpha.json.$$.tmp', push.remote_command("alpha"))
         self.assertEqual(os.path.basename(hub.inbox_tmp_path("/s", "alpha")), ".alpha.json.tmp")
+
+
+class TestOverlappingPushes(PushBase):
+    """S3: two pushes of one host overlap (manual + timer). Neither may corrupt the other.
+
+    With a fixed tmp name both uploads shared one file: the second `cat >` truncated it and
+    the first kept writing at its old offset, so the renamed result was a mix (or NUL bytes
+    that still ended in a newline). The tmp name is now unique per push.
+    """
+
+    def start_remote(self, host="alpha"):
+        """Start the real upload script (what sshd would run) against the fake hub's HOME."""
+        env = dict(os.environ)
+        env.pop("XDG_STATE_HOME", None)
+        env["HOME"] = self.ssh.hub_home
+        return subprocess.Popen(["sh", "-c", push.remote_command(host)], stdin=subprocess.PIPE, env=env)
+
+    def wait_for_tmp_bytes(self):
+        """Block until some in-flight dot-file in the hub inbox holds bytes."""
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            for name in self.ssh.inbox_files():
+                if name.startswith(".") and os.path.getsize(os.path.join(self.ssh.inbox_dir(), name)) > 0:
+                    return
+            time.sleep(0.02)
+        self.fail("upload never started writing its tmp file")
+
+    @staticmethod
+    def doc(tag, size):
+        # Valid single-line JSON + "\n" of a chosen size, distinguishable by tag.
+        return (json.dumps({"schema": 1, "tag": tag, "pad": "x" * size}) + "\n").encode("utf-8")
+
+    def test_overlapping_uploads_never_mix(self):
+        a, b = self.doc("A", 4000), self.doc("B", 1500)
+        first = self.start_remote()
+        first.stdin.write(a[:1000])
+        first.stdin.flush()
+        self.wait_for_tmp_bytes()  # A is mid-stream with its tmp open
+        second = self.start_remote()  # B runs start to finish while A is still open
+        second.communicate(b)
+        first.communicate(a[1000:])  # A finishes last
+        self.assertEqual((first.returncode, second.returncode), (0, 0))
+        final = self.ssh.read_inbox("alpha")
+        self.assertIn(final, (a, b))  # exactly one upload's bytes, never a mix, no NUL padding
+        self.assertEqual(json.loads(final.decode("utf-8"))["schema"], 1)
+        self.assertEqual(self.ssh.inbox_files(), ["alpha.json"])  # no tmp left behind
+
+    def test_each_upload_uses_its_own_tmp_name(self):
+        first, second = self.start_remote(), self.start_remote()
+        first.stdin.write(b"1")
+        first.stdin.flush()
+        second.stdin.write(b"2")
+        second.stdin.flush()
+        deadline = time.time() + 10
+        while time.time() < deadline and len([n for n in self.ssh.inbox_files() if n.startswith(".")]) < 2:
+            time.sleep(0.02)
+        tmps = [n for n in self.ssh.inbox_files() if n.startswith(".")]
+        first.communicate()
+        second.communicate()
+        self.assertEqual(len(tmps), 2, tmps)  # two in-flight uploads, two distinct dot-files
+        for name in tmps:
+            self.assertRegex(name, r"^\.alpha\.json\.[^/]+\.tmp$")
+
+    def test_failed_upload_removes_its_tmp_file(self):
+        # Incomplete stream (no trailing newline) fails the completeness check: nothing renamed
+        # and the tmp is cleaned up rather than left behind.
+        proc = self.start_remote()
+        proc.communicate(b'{"schema":1')
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertEqual(self.ssh.inbox_files(), [])
+
+    def test_local_overlapping_deliveries_never_mix(self):
+        config = dataclasses.replace(self.config, hub="local")
+        a, b = self.doc("A", 4000), self.doc("B", 1500)
+        real_replace = os.replace
+        nested = []
+
+        def replace_after_other_delivery(src, dst):
+            # A is fully written to ITS tmp; a second delivery runs completely before A renames.
+            if not nested:
+                nested.append(True)
+                push.deliver_local(config, b)
+            real_replace(src, dst)
+
+        with mock.patch("grid_fleet.push.os.replace", replace_after_other_delivery):
+            push.deliver_local(config, a)
+        with open(hub.inbox_path(self.state, "alpha"), "rb") as fh:
+            self.assertEqual(fh.read(), a)  # the later rename wins whole
+        self.assertEqual(os.listdir(hub.inbox_dir(self.state)), ["alpha.json"])
+
+    def test_local_tmp_is_unique_owner_only_dotfile(self):
+        config = dataclasses.replace(self.config, hub="local")
+        seen = []
+        real_replace = os.replace
+
+        def spy(src, dst):
+            seen.append((src, os.stat(src).st_mode & 0o777))
+            real_replace(src, dst)
+
+        with mock.patch("grid_fleet.push.os.replace", spy):
+            push.deliver_local(config, self.doc("A", 10))
+            push.deliver_local(config, self.doc("B", 10))
+        self.assertEqual(len(seen), 2)
+        self.assertNotEqual(seen[0][0], seen[1][0])  # a new tmp name every delivery
+        for path, mode in seen:
+            self.assertTrue(os.path.basename(path).startswith(".alpha.json."), path)  # readers ignore it
+            self.assertEqual(mode, 0o600)
+
+    def test_local_write_failure_removes_tmp(self):
+        config = dataclasses.replace(self.config, hub="local")
+        os.makedirs(hub.inbox_dir(self.state))
+        with mock.patch("grid_fleet.push.os.fdopen", side_effect=OSError(28, "synthetic")):
+            with self.assertRaises(OSError):
+                push.deliver_local(config, b"x\n")
+        self.assertEqual(os.listdir(hub.inbox_dir(self.state)), [])
 
 
 class TestLocalHub(PushBase):
@@ -504,11 +635,11 @@ class TestHostNameSafety(PushBase):
     def test_remote_command_contains_only_safe_host_characters(self):
         for raw in (self.HOSTILE, "a'b", 'a"b', "$(id)", "a b", "`id`", "a\nb", "", "...", "ok-host_1.example"):
             cmd = push.remote_command(raw)
-            # Exactly the four host slots (cat target, tail check, mv source, mv target),
-            # each filled with the same safe token.
+            # Exactly the two host slots (tmp name, mv target), each filled with the same
+            # safe token.
             host = cfg.sanitize_host_name(raw)
             self.assertRegex(host, r"^[A-Za-z0-9_-][A-Za-z0-9._-]*$")
-            self.assertEqual(cmd.count(host + ".json"), 4, (raw, cmd))
+            self.assertEqual(cmd.count(host + ".json"), 2, (raw, cmd))
             self.assertEqual(cmd.count("'"), 2)  # only the wrapping quotes
 
 

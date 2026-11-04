@@ -343,6 +343,33 @@ def _write_atomic(path: str, text: str, mode: int = 0o644) -> None:
         raise
 
 
+def _makedirs_private(path: str) -> None:
+    """Like os.makedirs(exist_ok=True), but every directory THIS call creates is 0700.
+
+    The state dir (snapshots, inbox) and the config dir hold per-user data, so a dir we
+    create must not be group/world-readable. os.makedirs(mode=) only applies the mode to
+    the leaf (and the umask can mask it), so each missing component is made and chmod-ed
+    explicitly. A directory that already existed is never chmod-ed: its mode is the
+    user's choice.
+    """
+    missing = []
+    p = os.path.abspath(path)
+    while not os.path.isdir(p):
+        missing.append(p)
+        parent = os.path.dirname(p)
+        if parent == p:
+            break
+        p = parent
+    for d in reversed(missing):
+        try:
+            os.mkdir(d, 0o700)
+        except FileExistsError:
+            if not os.path.isdir(d):  # a regular file in the way: same error os.makedirs gives
+                raise
+            continue  # created by someone else meanwhile: not ours to chmod
+        os.chmod(d, 0o700)
+
+
 def _tty() -> bool:
     return sys.stdin.isatty() and sys.stdout.isatty()
 
@@ -379,7 +406,7 @@ def _apply(kind, entries, uid, runner, state_dir, loaded):
     """
     changed = [e for e in entries if e[0] != "unchanged"]
     if kind == "launchd":
-        os.makedirs(state_dir, exist_ok=True)  # launchd will not create the log's directory
+        _makedirs_private(state_dir)  # launchd will not create the log's directory
         for _s, path, text in changed:
             _write_atomic(path, text)
         if loaded:
@@ -610,9 +637,14 @@ def _mode_of(path: str) -> int:
 
 
 def _backup(path: str, raw: bytes) -> str:
-    """Byte copy of the settings file next to it, with its mode, never overwriting one."""
+    """Byte copy of the settings file next to it, never overwriting one.
+
+    The backup's mode is the original's mode & 0600: settings.json can hold secrets
+    (env values, tokens), so a backup is never group/world-readable even when the
+    original is, and never wider than the original. (Backups are not pruned.)
+    """
     stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime(cfg.now()))
-    mode = _mode_of(path)
+    mode = _mode_of(path) & 0o600
     for n in range(100):
         dest = "%s%s%s%s" % (path, BACKUP_INFIX, stamp, "" if n == 0 else "-%d" % n)
         try:
@@ -768,6 +800,8 @@ def _set_config_original(config_path: str, value: Optional[str], create: bool,
     if only_if is not None and data.get(CONFIG_KEY) != only_if:
         return
     data[CONFIG_KEY] = value
+    # A config dir this tool has to create (first install) is private, like the file in it.
+    _makedirs_private(os.path.dirname(os.path.realpath(config_path)))
     _write_json_file(config_path, data, style, mode)
 
 

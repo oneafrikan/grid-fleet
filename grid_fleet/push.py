@@ -14,7 +14,8 @@ What `push` does (spec: push-transport; design.md "Hub"):
      never carry old data (design.md "Staleness").
   3. Deliver the snapshot bytes:
        hub == "local" -> atomic write into the local inbox, no ssh.
-       otherwise      -> `ssh -o BatchMode=yes -o ConnectTimeout=10 <alias>
+       otherwise      -> `ssh -o BatchMode=yes -o ConnectTimeout=10
+                         -o ClearAllForwardings=yes -- <alias>
                          "sh -c '<upload script>'"` with the bytes on stdin.
   4. Failure (ssh non-zero, timeout, cannot spawn): exit EXIT_FAILED, keep the
      local snapshot, ONE short stderr line, no retry loop. The next timer tick
@@ -39,6 +40,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 from typing import Optional
 
 from grid_fleet import config as cfg
@@ -66,7 +68,18 @@ LOCAL_HUB = "local"
 # hub's login shell is irrelevant.
 #
 #   umask 077         -> files are 0600
-#   cat > .H.json.tmp -> the in-flight upload lives in a dot-file readers ignore
+#   t=.H.json.$$.tmp  -> the in-flight upload lives in a dot-file readers ignore. The
+#                        name carries the shell PID ($$) so it is UNIQUE per push: a
+#                        manual push overlapping a timer push used to share one fixed
+#                        tmp, the second `cat >` truncated it while the first kept
+#                        writing at its old offset, and the rename published a file
+#                        that was part NUL bytes yet still ended in a newline.
+#   trap c EXIT       -> removes the tmp on every exit path (failed check, cat error,
+#                        completed mv: then it is already gone and `rm -f` is a no-op).
+#                        A function, not `trap 'rm ...'`, because the script must hold
+#                        no single quote (it sits inside one single-quoted argument).
+#                        SIGKILL / a killed session skips the trap and leaves the dot-
+#                        file behind; readers ignore it.
 #   [ ... -eq 1 ]     -> completeness check: only rename if the tmp file ends in
 #                        "\n". Snapshots are always written as JSON + "\n"
 #                        (sources_claude.atomic_write_json). If the client drops
@@ -82,13 +95,18 @@ LOCAL_HUB = "local"
 #   mv                -> atomic rename over the previous <host>.json
 UPLOAD_SCRIPT = (
     'umask 077; d="${XDG_STATE_HOME:-$HOME/.local/state}/grid-fleet/inbox"; '
-    'mkdir -p "$d" && cat > "$d/.@HOST@.json.tmp" && '
-    '[ "$(tail -c 1 "$d/.@HOST@.json.tmp" | wc -l)" -eq 1 ] && '
-    'mv "$d/.@HOST@.json.tmp" "$d/@HOST@.json"'
+    't="$d/.@HOST@.json.$$.tmp"; c() { rm -f "$t"; }; trap c EXIT; '
+    'mkdir -p "$d" && cat > "$t" && '
+    '[ "$(tail -c 1 "$t" | wc -l)" -eq 1 ] && '
+    'mv "$t" "$d/@HOST@.json"'
 )
 
-# Whitespace or ASCII control chars (incl. DEL) anywhere in the alias.
-_BAD_ALIAS_CHARS = re.compile(r"[\s\x00-\x1f\x7f]")
+# The conservative alias charset: letters, digits and . _ @ : - . That covers a config
+# alias, `user@host`, a dotted host name, an IPv4 address and an unbracketed IPv6 one;
+# it excludes whitespace, control characters, quotes, `%`, `/`, `$`, `;` and every
+# other shell or ssh-token metacharacter (ProxyCommand-style `%h` expansion, etc.).
+# Matched with fullmatch: a `$` anchor would let a trailing "\n" through.
+_ALIAS_CHARS = re.compile(r"[A-Za-z0-9._@:-]+")
 
 
 class PushError(Exception):
@@ -98,16 +116,18 @@ class PushError(Exception):
 def validate_hub(hub_value: object) -> Optional[str]:
     """Return None if `hub_value` is a usable ssh alias (or "local"), else the reason.
 
-    The alias is passed to ssh as a bare argv word, so a leading "-" would be
-    parsed by ssh as an option (e.g. -oProxyCommand=...). Whitespace/control
-    characters have no place in a host alias either.
+    The alias is passed to ssh as a bare argv word. A leading "-" would be parsed by
+    ssh as an option (e.g. -oProxyCommand=...); deliver_ssh also puts `--` before it,
+    but the check stays so the failure is a clear config error. The rest of the value
+    is held to a conservative charset (_ALIAS_CHARS) so no metacharacter can reach ssh
+    or a user's `%h`-expanding ssh_config entry.
     """
     if not isinstance(hub_value, str) or not hub_value:
         return "must be a non-empty ssh host alias or \"local\""
     if hub_value.startswith("-"):
         return "must not start with \"-\" (ssh would read it as an option)"
-    if _BAD_ALIAS_CHARS.search(hub_value):
-        return "must not contain whitespace or control characters"
+    if not _ALIAS_CHARS.fullmatch(hub_value):
+        return "may only contain letters, digits and . _ @ : -"
     return None
 
 
@@ -172,19 +192,20 @@ def fresh_snapshot_bytes(config) -> bytes:
 
 
 def deliver_local(config, data: bytes) -> None:
-    """Write `data` as <state_dir>/inbox/<host>.json: tmp dot-file + atomic rename.
+    """Write `data` as <state_dir>/inbox/<host>.json: unique tmp dot-file + atomic rename.
 
-    Mirrors the remote script (umask 077, `.<host>.json.tmp`, mv) so a reader
-    never sees a partial file. Raises OSError.
+    Mirrors the remote script (owner-only, dot-prefixed tmp, rename) so a reader never
+    sees a partial file. The tmp name is unique per call (mkstemp: O_EXCL, so it never
+    follows a pre-planted symlink, and mode 0600), so two overlapping deliveries cannot
+    truncate each other's file. The tmp is removed on any failure. Raises OSError.
     """
     host = cfg.sanitize_host_name(config.host_name)
     final = hub.inbox_path(config.state_dir, host)
-    tmp = hub.inbox_tmp_path(config.state_dir, host)
-    os.makedirs(os.path.dirname(final), mode=0o700, exist_ok=True)
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    inbox = os.path.dirname(final)
+    os.makedirs(inbox, mode=0o700, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix="." + host + ".json.", suffix=".tmp", dir=inbox)
     try:
         with os.fdopen(fd, "wb") as fh:
-            os.fchmod(fh.fileno(), 0o600)  # in case the tmp pre-existed with other bits
             fh.write(data)
         os.replace(tmp, final)
     except BaseException:
@@ -201,6 +222,9 @@ def deliver_ssh(config, data: bytes) -> None:
         "ssh",  # resolved via PATH; tests put a fake first
         "-o", "BatchMode=yes",  # never prompt (passphrase, host key, password)
         "-o", "ConnectTimeout=10",  # never hang on an unreachable hub
+        # One-shot upload: never open port/agent/X11 forwards a user's ssh config asks for.
+        "-o", "ClearAllForwardings=yes",
+        "--",  # end of options: the alias can never be parsed as one, whatever it holds
         config.hub,
         remote_command(config.host_name),
     ]

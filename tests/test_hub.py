@@ -8,7 +8,8 @@ import unittest
 
 from grid_fleet import hub
 from helpers import synthetic_snapshot as syn
-from helpers.synthetic_snapshot import NOW, NULL, make_snapshot, write_inbox_file
+from helpers.synthetic_snapshot import (NOW, NULL, limit_window, make_limits, make_snapshot,
+                                        write_inbox_file)
 
 
 class HubCase(unittest.TestCase):
@@ -311,6 +312,119 @@ class TestSignatureAndReadOnly(HubCase):
     def test_reader_does_not_create_missing_inbox(self):
         hub.read_hub(self.state, NOW)
         self.assertEqual(os.listdir(self.state), [])
+
+
+
+class TestHostileFreshnessFields(HubCase):
+    """S5: the hub must not let a spoke-supplied field win forever or make it do unbounded work."""
+
+    FIVE_RESET = NOW + 2 * 3600
+    SEVEN_RESET = NOW + 4 * 86400
+
+    def limits_snap(self, host, captured_at, five_pct, account="default"):
+        lim = make_limits(captured_at, limit_window(five_pct, self.FIVE_RESET),
+                          limit_window(five_pct, self.SEVEN_RESET))
+        return make_snapshot(host, account=account, limits=lim)
+
+    def five_hour(self, state, account="default"):
+        return [b for b in state.limits if b.account == account][0].five_hour
+
+    # -- (a) limits.captured_at ------------------------------------------------------------
+    def test_future_dated_capture_does_not_win_forever(self):
+        # A spoke stamping captured_at far in the future would beat every honest capture until
+        # the end of time. It is ignored instead, so the honest host's figures show.
+        self.put("honest", self.limits_snap("honest", NOW - 60, 40.0))
+        self.put("hostile", self.limits_snap("hostile", NOW + 10 ** 9, 99.0))
+        w = self.five_hour(self.read())
+        self.assertEqual(w.pct, 40.0)
+
+    def test_future_dated_capture_alone_is_unknown(self):
+        self.put("hostile", self.limits_snap("hostile", NOW + 3600, 99.0))
+        w = self.five_hour(self.read())
+        self.assertEqual((w.pct, w.age_s), (None, None))
+
+    def test_capture_within_the_skew_allowance_is_still_used(self):
+        self.put("alpha", self.limits_snap("alpha", NOW + hub.MAX_CAPTURE_SKEW_S, 40.0))
+        w = self.five_hour(self.read())
+        self.assertEqual((w.pct, w.age_s), (40.0, 0))  # age clamps to 0, as for host age
+
+    def test_capture_one_second_past_the_skew_allowance_is_ignored(self):
+        self.put("alpha", self.limits_snap("alpha", NOW + hub.MAX_CAPTURE_SKEW_S + 1, 40.0))
+        self.assertIsNone(self.five_hour(self.read()).pct)
+
+    # -- (b) inbox file count --------------------------------------------------------------
+    def test_scan_reads_at_most_max_inbox_files_and_counts_the_rest_skipped(self):
+        names = ["h%03d" % i for i in range(hub.MAX_INBOX_FILES + 5)]
+        inbox = os.path.join(self.state, "inbox")
+        os.makedirs(inbox)
+        body = json.dumps(make_snapshot("x")).encode()
+        for n in names:
+            with open(os.path.join(inbox, n + ".json"), "wb") as fh:
+                fh.write(body)
+            os.utime(os.path.join(inbox, n + ".json"), (NOW - 60, NOW - 60))
+        s = self.read()
+        self.assertEqual(len(s.hosts), hub.MAX_INBOX_FILES)
+        self.assertEqual(s.skipped, 5)
+        # Deterministic: the first names (sorted) are read, the last ones are the skipped.
+        self.assertEqual([h.name for h in s.hosts], sorted(names)[:hub.MAX_INBOX_FILES])
+
+    def test_file_count_cap_applies_to_the_change_signature_too(self):
+        # inbox_signature stats every file on each poll: it must not be unbounded either, but a
+        # new file beyond the cap must still change it (the footer count moves).
+        inbox = os.path.join(self.state, "inbox")
+        os.makedirs(inbox)
+        for i in range(hub.MAX_INBOX_FILES + 1):
+            with open(os.path.join(inbox, "h%03d.json" % i), "w") as fh:
+                fh.write("{}")
+        sig = hub.inbox_signature(self.state)
+        self.assertLessEqual(len(sig), hub.MAX_INBOX_FILES + 1)
+        with open(os.path.join(inbox, "z-extra.json"), "w") as fh:
+            fh.write("{}")
+        self.assertNotEqual(hub.inbox_signature(self.state), sig)
+
+    def test_dotfiles_do_not_count_toward_the_cap(self):
+        inbox = os.path.join(self.state, "inbox")
+        os.makedirs(inbox)
+        for i in range(hub.MAX_INBOX_FILES + 3):
+            with open(os.path.join(inbox, ".h%03d.json.1.tmp" % i), "w") as fh:
+                fh.write("{")
+        self.put("alpha")
+        s = self.read()
+        self.assertEqual(([h.name for h in s.hosts], s.skipped), (["alpha"], 0))
+
+    # -- (c) interval_s --------------------------------------------------------------------
+    def test_huge_interval_is_clamped_so_the_host_still_goes_stale(self):
+        # interval_s = 10**12 would make a dead host fresh for ~63,000 years.
+        snap = make_snapshot("alpha")
+        snap["interval_s"] = 10 ** 12
+        self.put("alpha", snap, age_s=2 * hub.MAX_INTERVAL_S + 1)
+        h = self.host(self.read(), "alpha")
+        self.assertEqual((h.status, h.interval_s), (hub.STALE, hub.MAX_INTERVAL_S))
+
+    def test_interval_at_the_maximum_is_used_exactly(self):
+        snap = make_snapshot("alpha")
+        snap["interval_s"] = hub.MAX_INTERVAL_S
+        self.put("alpha", snap, age_s=2 * hub.MAX_INTERVAL_S)
+        h = self.host(self.read(), "alpha")
+        self.assertEqual((h.status, h.interval_s), (hub.FRESH, hub.MAX_INTERVAL_S))
+
+    def test_legal_intervals_are_untouched(self):
+        for iv in (300, 600, 900):
+            snap = make_snapshot("alpha")
+            snap["interval_s"] = iv
+            self.put("alpha", snap)
+            self.assertEqual(self.host(self.read(), "alpha").interval_s, iv)
+
+    def test_hostile_interval_values_fall_back_or_clamp_never_crash(self):
+        for bad, expected in ((float("inf"), 600), (-5, 600), (0, 600), (True, 600),
+                              ("9" * 50, 600), (None, 600), (10 ** 400, hub.MAX_INTERVAL_S),
+                              (3601, hub.MAX_INTERVAL_S)):
+            snap = make_snapshot("alpha")
+            snap["interval_s"] = bad
+            # json.dumps writes Infinity for inf, which json.loads accepts: the value must
+            # still be handled as "not a usable interval".
+            self.put("alpha", snap, age_s=60)
+            self.assertEqual(self.host(self.read(), "alpha").interval_s, expected, repr(bad))
 
 
 if __name__ == "__main__":
