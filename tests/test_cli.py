@@ -1,4 +1,4 @@
-"""cli.py: --version, every subcommand reachable and (for now) a stub, no-args behaviour."""
+"""cli.py: --version, every subcommand is real (none are stubs), no-args behaviour."""
 
 import contextlib
 import io
@@ -47,10 +47,12 @@ class TestCli(CliCase):
         self.assertEqual(rc, 0)
         self.assertIn(__version__, out)
 
-    def test_tap_stub_with_command(self):
-        rc, _, err = self.run_cli(["tap", "--", "echo", "--flag", "x"])
-        self.assertEqual(rc, 2)
-        self.assertIn("not implemented", err)
+    def test_tap_is_real_not_a_stub(self):
+        # tap with no original command prints nothing and exits 0 (limits-capture spec).
+        # Stdin is an empty in-memory buffer so the test never blocks on a terminal.
+        with mock.patch("sys.stdin", io.TextIOWrapper(io.BytesIO(b""))):
+            rc, out, _ = self.run_cli(["tap"])
+        self.assertEqual((rc, out), (0, ""))
 
     def test_tap_command_split_verbatim(self):
         # The wrapped command (including its own flags) must reach tap_main untouched.
@@ -116,10 +118,11 @@ class TestCli(CliCase):
             rc, _, err = self.run_cli([name])
             self.assertEqual(rc, cli.EXIT_CONFIG, name)
             self.assertIn("config error", err)
-        # tap must survive a broken config (reaches the stub, exit 2)
-        rc, _, err = self.run_cli(["tap", "--", "true"])
-        self.assertEqual(rc, 2)
-        self.assertIn("not implemented", err)
+        # tap must survive a broken config: it falls back to defaults and runs
+        # (no original command here, so it exits 0 and prints nothing).
+        with mock.patch("sys.stdin", io.TextIOWrapper(io.BytesIO(b""))):
+            rc, out, err = self.run_cli(["tap"])
+        self.assertEqual((rc, out, err), (0, "", ""))
 
 
 class TestEntryScript(CliCase):
@@ -128,15 +131,15 @@ class TestEntryScript(CliCase):
         with open(BIN) as fh:
             self.assertEqual(fh.readline().strip(), "#!/usr/bin/env python3")
 
-    def test_bin_version_and_stub_exit(self):
+    def test_bin_version_and_help(self):
         # Run under the same interpreter as the suite (system 3.9 on macOS).
         r = subprocess.run([sys.executable, BIN, "--version"], capture_output=True, text=True)
         self.assertEqual(r.returncode, 0)
         self.assertIn(__version__, r.stdout)
-        # `tap` is the one remaining stub (install is implemented and has its own tests).
-        r = subprocess.run([sys.executable, BIN, "tap"], capture_output=True, text=True)
-        self.assertEqual(r.returncode, 2)
-        self.assertIn("not implemented", r.stderr)
+        # --help is stable and side-effect free; no subcommand is a stub any more.
+        r = subprocess.run([sys.executable, BIN, "--help"], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("usage:", r.stdout)
 
     def test_bin_via_symlink(self):
         # Install is "symlink bin/grid-fleet onto PATH"; the package must still be found.

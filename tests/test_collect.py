@@ -1,7 +1,9 @@
 """Tests for `collect` (Group 2): sessions, token totals, incremental scan, fail-soft, privacy.
 
 Scenario names follow openspec/changes/fleet-tracer-bullet/specs/snapshot-collect/spec.md.
-NOT covered here on purpose (other groups): Subagent leaderboard (`agents` section) and limits.
+NOT covered here on purpose (other groups): Subagent leaderboard (`agents` section).
+The `limits` section (read from the tap's limits.json) is covered by TestLimitsSection below;
+the tap itself is covered by test_limits.py.
 
 Everything runs against a synthetic Claude tree and a fake `claude` executable in temp
 dirs, with GRID_FLEET_* overrides and a fixed clock. No test reads the real ~/.claude.
@@ -130,7 +132,8 @@ def ev(age_s, **tokens):
 
 class TestSnapshotContent(CollectBase):
     def test_full_snapshot(self):
-        # Scenario: Full snapshot (limits/agents are later groups and stay null)
+        # Scenario: Full snapshot (agents is a later group and stays null; limits is null here
+        # only because no limits.json exists in this fixture)
         self.session("proj-a", "sess-1", [ev(60, output=100, input=10, cache_creation=5, cache_read=1000)])
         self.subagent("proj-a", "sess-1", "a1", "core-researcher", [ev(30, output=50, input=2)])
         self.tree.set_agents([agent_row(status="busy"), agent_row(status="waiting")])
@@ -152,7 +155,7 @@ class TestSnapshotContent(CollectBase):
         self.assertIn("agents", snap)
         self.assertIn("limits", snap)
         self.assertIsNone(snap["agents"])  # group 6
-        self.assertIsNone(snap["limits"])  # group 7
+        self.assertIsNone(snap["limits"])  # no limits.json captured
 
     def test_section_unavailable_projects_dir_missing(self):
         # Scenario: Section unavailable (exit code 0 via collect_main)
@@ -661,6 +664,74 @@ class TestPrivacy(CollectBase):
         self.assertEqual(set(snap), {"schema", "agent", "agent_version", "host", "account", "collected_at",
                                      "interval_s", "sessions", "tokens", "agents", "limits", "warnings"})
         self.assertTrue(re.match(r"^[A-Za-z0-9._-]+$", snap["host"]))
+
+
+class TestLimitsSection(CollectBase):
+    """Collect side of limits capture (snapshot-collect + limits-capture specs).
+
+    The file is written by hand here (the tap has its own tests in test_limits.py).
+    """
+
+    GOOD = {"schema": 1, "captured_at": NOW - 120,
+            "five_hour": {"used_pct": 42.0, "resets_at": NOW + 3600},
+            "seven_day": {"used_pct": 18.0, "resets_at": NOW + 86400}}
+
+    def put(self, obj):
+        os.makedirs(self.state, exist_ok=True)
+        with open(os.path.join(self.state, "limits.json"), "w") as fh:
+            if isinstance(obj, str):
+                fh.write(obj)
+            else:
+                json.dump(obj, fh)
+
+    def test_full_snapshot_carries_captured_limits(self):
+        # Scenario: Full snapshot (limits populated from the limits file)
+        self.put(self.GOOD)
+        limits = self.collect()["limits"]
+        self.assertEqual(limits, {"captured_at": NOW - 120,
+                                  "five_hour": {"used_pct": 42.0, "resets_at": NOW + 3600},
+                                  "seven_day": {"used_pct": 18.0, "resets_at": NOW + 86400}})
+
+    def test_no_file_is_null_not_zero(self):
+        # Scenario: Non-Max plan / Fresh session -> limits: null
+        self.assertIsNone(self.collect()["limits"])
+
+    def test_each_window_is_independently_optional(self):
+        for keep in ("five_hour", "seven_day"):
+            body = {k: v for k, v in self.GOOD.items() if k in ("schema", "captured_at", keep)}
+            self.put(body)
+            limits = self.collect()["limits"]
+            self.assertEqual(set(limits), {"captured_at", keep})
+
+    def test_invalid_file_is_null_and_collect_still_succeeds(self):
+        for bad in ("{not json", "[]", "null", '{"schema": 1}',
+                    json.dumps({"schema": 99, "captured_at": 1, "five_hour": {"used_pct": 1, "resets_at": 2}}),
+                    json.dumps({"schema": 1, "captured_at": "x", "five_hour": {"used_pct": 1, "resets_at": 2}}),
+                    json.dumps({"schema": 1, "captured_at": 1, "five_hour": {"used_pct": True, "resets_at": 2}})):
+            self.put(bad)
+            self.assertIsNone(self.collect()["limits"], bad)
+
+    def test_unknown_fields_in_the_file_never_reach_the_snapshot(self):
+        body = json.loads(json.dumps(self.GOOD))
+        body["cwd"] = SYNTH_CWD
+        body["five_hour"]["session_id"] = SYNTH_SESSION_NAME
+        self.put(body)
+        text = json.dumps(self.collect())
+        for s in (SYNTH_CWD, SYNTH_SESSION_NAME):
+            self.assertNotIn(s, text)
+
+    def test_account_label_comes_from_config(self):
+        self.put(self.GOOD)
+        snap = self.collect(self.make_config({"account": "team-plan"}))
+        self.assertEqual(snap["account"], "team-plan")
+        self.assertIsNotNone(snap["limits"])
+
+    def test_collect_main_exits_zero_with_limits_present(self):
+        self.put(self.GOOD)
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(snapshot.collect_main(self.config, None), 0)
+        with open(os.path.join(self.state, "snapshot.json")) as fh:
+            self.assertEqual(json.load(fh)["limits"]["five_hour"]["used_pct"], 42.0)
 
 
 if __name__ == "__main__":
