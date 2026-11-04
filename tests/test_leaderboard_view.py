@@ -500,6 +500,43 @@ class TestLeaderboardView(PanelCase):
             self.assertTrue(all(len(t) == w for t in texts), w)
             self.assertTrue(any("busy" in t for t in texts))
 
+    def row_with(self, name, width, height=40):
+        """The single rendered line carrying `name` (and nothing else of the panel)."""
+        hits = [t for t in self.text(width=width, height=height) if " %s " % name in t]
+        self.assertEqual(len(hits), 1, hits)
+        return hits[0]
+
+    def test_a_small_non_zero_type_still_gets_a_one_cell_bar(self):
+        # V04. 1 invocation against 1000 scales to 0 cells; the minimum keeps it visible.
+        # Width 70 is below the side-by-side threshold, so only the leaderboard draws bars on
+        # these lines (the sparkline glyphs would otherwise share the same block character).
+        for h in ("alpha", "beta"):
+            self.put(h, agents=NULL)
+        self.put("gamma", agents=make_agents(agent_row("big", 1000), agent_row("tiny", 1)))
+        self.assertEqual(self.row_with("tiny", 70).count("█"), 1)
+        self.assertEqual(self.row_with("big", 70).count("█"), view.BOARD_BAR_MAX)
+
+    def test_output_column_is_dropped_before_it_can_crowd_out_the_bar(self):
+        # V12. At width 72 the right column is 38 cells wide. Long type names (20-cell type
+        # column) leave 7 spare cells: too few for output (7) AND a bar (>= 5), so the dim
+        # output figure goes and the bar stays. Short names leave room for both.
+        for h in ("alpha", "beta"):
+            self.put(h, agents=NULL)
+        long_a, long_b = "long-agent-name-aaaaa", "long-agent-name-bbbbb"
+        self.put("gamma", agents=make_agents(agent_row(long_a, 100, 777000),
+                                             agent_row(long_b, 50, 555000)))
+        texts = self.text(width=72, height=40)
+        self.assertTrue(all(len(t) == 72 for t in texts))  # nothing wider than the terminal
+        row = self.row_with(long_a[:19] + "\u2026", 72)  # the type is clipped with an ellipsis
+        self.assertNotIn("777k", row)
+        self.assertNotIn("777k", "\n".join(texts))
+        self.assertIn("█", row.split("│")[2])  # a bar remains in the leaderboard half
+        # Same width, short names: there IS room, so the output column is shown.
+        self.put("gamma", agents=make_agents(agent_row("short-a", 100, 777000)))
+        texts = self.text(width=72, height=40)
+        self.assertTrue(all(len(t) == 72 for t in texts))
+        self.assertIn("777k", "\n".join(texts))
+
     def test_stale_host_agents_are_not_shown(self):
         self.put("gamma", age_s=41 * 60, agents=make_agents(agent_row("ghost-agent", 500)))
         self.assertNotIn("ghost-agent", "\n".join(self.text()))
