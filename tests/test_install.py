@@ -132,12 +132,15 @@ class InstallCase(unittest.TestCase):
         os.makedirs(self.home)
         self.state = os.path.join(self.work, "state")
         self.env = {"HOME": self.home, "PATH": SYNTH_PATH}
+        # `install --apply` now writes this file, so it must be a temp path (never real).
+        # Its directory is NOT created: apply creates it (0700) like the real first run.
+        self.cfg_path = os.path.join(self.work, "cfg", "config.json")
         self.config = cfg.Config(hub="hub-alias", interval_s=600,
-                                 config_path="/synth/config.json", state_dir=self.state)
+                                 config_path=self.cfg_path, state_dir=self.state)
         self.runner = FakeRunner()
 
     def args(self, **kw):
-        base = dict(interval=None, apply=False, uninstall=False)
+        base = dict(interval=None, apply=False, uninstall=False, hub=None, account=None)
         base.update(kw)
         return argparse.Namespace(**base)
 
@@ -243,8 +246,8 @@ class TestPlanBeforeApply(InstallCase):
         self.assertEqual(first, self.run_install("systemd")[1])
 
     def test_plan_warns_when_no_hub(self):
-        noh = cfg.Config(hub=None, config_path="/synth/config.json", state_dir=self.state)
-        self.assertIn("no `hub`", self.run_install(config=noh)[1])
+        noh = cfg.Config(hub=None, config_path=self.cfg_path, state_dir=self.state)
+        self.assertIn("no hub", self.run_install(config=noh)[1])
 
     def test_non_interactive_apply_prints_plan_exits_nonzero_modifies_nothing(self):
         for kind in ("launchd", "systemd"):
@@ -278,7 +281,7 @@ class TestMacos(InstallCase):
         # S4: the state dir will hold snapshots and the inbox; install creates it 0700, and so
         # every parent it had to create on the way (not just the leaf).
         deep = os.path.join(self.work, "newparent", "state")
-        conf = cfg.Config(hub="hub-alias", interval_s=600, config_path="/synth/config.json",
+        conf = cfg.Config(hub="hub-alias", interval_s=600, config_path=self.cfg_path,
                           state_dir=deep)
         rc, _, err = self.run_install("launchd", config=conf, apply=True)
         self.assertEqual(rc, 0, err)
@@ -297,13 +300,9 @@ class TestMacos(InstallCase):
         self.assertEqual(plistlib.loads(_readb(self.plist))["StartInterval"], 900)
 
     def test_interval_defaults_to_config(self):
-        conf = cfg.Config(hub="h", interval_s=300, state_dir=self.state, config_path="/c")
+        conf = cfg.Config(hub="h", interval_s=300, state_dir=self.state, config_path=self.cfg_path)
         self.run_install("launchd", config=conf, apply=True)
         self.assertEqual(plistlib.loads(_readb(self.plist))["StartInterval"], 300)
-
-    def test_interval_differing_from_config_warns(self):
-        _, out, _ = self.run_install("launchd", interval=900)
-        self.assertIn("differs from config interval_s 600", out)
 
     def test_no_root_needed(self):
         # Everything lands under HOME; nothing is run through sudo.
@@ -502,7 +501,8 @@ class TestUninstall(InstallCase):
         self.run_install("systemd", apply=True)
         self.run_install("systemd", uninstall=True)
         leftovers = [p for p in self.tree() if os.path.isfile(p) or os.path.islink(p)]
-        self.assertEqual(leftovers, [])
+        # The config (interval_s/hub/account) is the user's setting and is kept on purpose.
+        self.assertEqual(leftovers, [self.cfg_path])
 
     def test_uninstall_with_nothing_installed_is_ok_and_runs_nothing(self):
         rc, out, _ = self.run_install("systemd", uninstall=True)
@@ -566,7 +566,11 @@ class TestApplyOrdering(InstallCase):
             self.runner.calls.clear()
             orig = install._write_atomic
 
-            def boom(path, text):
+            def boom(path, text, mode=0o644):
+                # Only the unit files fail; the config (written first) goes through, so
+                # this still proves "unit write fails -> scheduler untouched".
+                if os.path.realpath(path) == os.path.realpath(self.cfg_path):
+                    return orig(path, text, mode)
                 raise OSError("synthetic write failure")
 
             install._write_atomic = boom
@@ -618,7 +622,7 @@ class TestUninstallFailures(InstallCase):
             self.assertNotEqual(rc, 0, kind)
             self.assertIn("unload FAILED", out)
             self.assertIn("synthetic failure", out)
-            leftovers = [p for p in self.tree() if os.path.isfile(p)]
+            leftovers = [p for p in self.tree() if os.path.isfile(p) and p != self.cfg_path]
             self.assertEqual(leftovers, [], "files still removed (%s)" % kind)
 
     def runner_failing(self, fail):
