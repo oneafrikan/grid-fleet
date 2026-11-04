@@ -269,9 +269,16 @@ def _warnings(config, interval_s: int, explicit_interval: bool) -> List[str]:
     return out
 
 
+def log_hint(kind: str, log_path: str) -> str:
+    """Where a failing tick (e.g. a push error) is logged; shown in the plan and after apply."""
+    if kind == "launchd":
+        return "logs: %s (stdout and stderr of each tick)" % log_path
+    return "logs: journalctl --user -u %s" % SYSTEMD_STEM
+
+
 def render_plan(kind: str, interval_s: int, python: str, script: str, path_env: str,
                 entries: Sequence[Tuple[str, str]], commands: Sequence[Sequence[str]],
-                warnings: Sequence[str]) -> str:
+                warnings: Sequence[str], log_path: str = "") -> str:
     """Human plan text. Deterministic: depends only on its arguments."""
     lines = ["grid-fleet install plan (%s)" % ("macOS, launchd" if kind == "launchd"
                                                else "Linux, systemd --user"),
@@ -280,6 +287,7 @@ def render_plan(kind: str, interval_s: int, python: str, script: str, path_env: 
              "  script:   %s" % script,
              "  PATH:     %s" % path_env,
              "  each tick: collect, then push",
+             "  " + log_hint(kind, log_path),
              "files:"]
     for state, path in entries:
         lines.append("  %-9s %s" % (state, path))
@@ -349,15 +357,21 @@ def _is_loaded(kind, uid, runner) -> bool:
 
 
 def _apply(kind, entries, uid, runner, state_dir, loaded):
-    """Make the system match `entries` [(state, path, text)]; `loaded` is _is_loaded()."""
+    """Make the system match `entries` [(state, path, text)]; `loaded` is _is_loaded().
+
+    Ordering rule: write the new files FIRST, touch the scheduler second. If a write
+    fails (read-only dir, disk full) the exception propagates before anything was
+    unloaded, so an already-running job keeps running on its old definition.
+    """
     changed = [e for e in entries if e[0] != "unchanged"]
     if kind == "launchd":
-        if loaded:
-            # Unload before rewriting; best effort, we bootstrap again right after.
-            runner(["launchctl", "bootout", "gui/%d/%s" % (uid, LAUNCHD_LABEL)])
         os.makedirs(state_dir, exist_ok=True)  # launchd will not create the log's directory
         for _s, path, text in changed:
             _write_atomic(path, text)
+        if loaded:
+            # Unload the old definition before loading the new file; best effort, the
+            # bootstrap right after is the step whose failure we report.
+            runner(["launchctl", "bootout", "gui/%d/%s" % (uid, LAUNCHD_LABEL)])
         _run_checked(runner, ["launchctl", "bootstrap", "gui/%d" % uid, entries[0][1]])
         return
     timer = SYSTEMD_STEM + ".timer"
@@ -369,9 +383,22 @@ def _apply(kind, entries, uid, runner, state_dir, loaded):
         _run_checked(runner, ["systemctl", "--user", "restart", timer])
 
 
-def _uninstall(kind, paths, uid, runner):
-    """Unload, then remove only files that carry our marker. Returns (messages, refused)."""
-    msgs, refused = [], False
+def _unload_argv(kind, uid):
+    if kind == "launchd":
+        return ["launchctl", "bootout", "gui/%d/%s" % (uid, LAUNCHD_LABEL)]
+    return ["systemctl", "--user", "disable", "--now", SYSTEMD_STEM + ".timer"]
+
+
+def _uninstall(kind, paths, uid, runner, loaded):
+    """Unload, then remove only files that carry our marker. Returns (messages, ok).
+
+    ok is False when anything was left alone or any scheduler command failed. A failed
+    unload never stops the file removal: the files are ours and the user asked for them
+    gone; the failure is reported and the exit code is non-zero. `loaded` is
+    _is_loaded(): the job is unloaded whenever the scheduler still has it, even if its
+    files were already deleted by hand.
+    """
+    msgs, ok = [], True
     owned = []
     for path in paths:
         st = file_state(path, "")  # text irrelevant: only the owned/absent/foreign split
@@ -379,21 +406,26 @@ def _uninstall(kind, paths, uid, runner):
             continue
         if st in ("foreign", "symlink"):
             msgs.append("left alone (%s, not created by grid-fleet): %s" % (st, path))
-            refused = True
+            ok = False
         else:
             owned.append(path)
-    if not owned:
-        return (msgs or ["nothing to remove"]), refused
-    if kind == "launchd":
-        runner(["launchctl", "bootout", "gui/%d/%s" % (uid, LAUNCHD_LABEL)])
-    else:
-        runner(["systemctl", "--user", "disable", "--now", SYSTEMD_STEM + ".timer"])
+    if loaded:
+        argv = _unload_argv(kind, uid)
+        rc, out = runner(argv)
+        if rc != 0:
+            msgs.append("unload FAILED (exit %d): `%s`: %s" % (rc, " ".join(argv), out.strip()))
+            ok = False
+        else:
+            msgs.append("unloaded")
     for path in owned:
         os.remove(path)  # a regular file with our marker; never a directory or symlink
         msgs.append("removed: " + path)
-    if kind == "systemd":
-        runner(["systemctl", "--user", "daemon-reload"])
-    return msgs, refused
+    if kind == "systemd" and (owned or loaded):
+        rc, out = runner(["systemctl", "--user", "daemon-reload"])
+        if rc != 0:
+            msgs.append("daemon-reload FAILED (exit %d): %s" % (rc, out.strip()))
+            ok = False
+    return (msgs or ["nothing to remove"]), ok
 
 
 # --- CLI ---------------------------------------------------------------------------------
@@ -468,7 +500,7 @@ def install_main(config, args, *, runner: Optional[Runner] = None,
 
     plan = render_plan(kind, interval_s, python, script, path_env,
                        [(s, p) for s, p, _t in entries], command_plan(kind, uid, paths),
-                       _warnings(config, interval_s, explicit is not None))
+                       _warnings(config, interval_s, explicit is not None), log_path)
     sys.stdout.write(plan)
     if not mode_change:
         sys.stdout.write("plan only: nothing was changed. Re-run with --apply to install.\n")
@@ -497,7 +529,7 @@ def install_main(config, args, *, runner: Optional[Runner] = None,
     except (InstallError, OSError) as exc:
         sys.stderr.write("grid-fleet install: %s\n" % exc)
         return EXIT_REFUSED
-    sys.stdout.write("installed\n")
+    sys.stdout.write("installed\n%s\n" % log_hint(kind, log_path))
     if kind == "systemd":
         sys.stdout.write(LINGER_NOTE + "\n")
     return EXIT_OK
@@ -506,11 +538,15 @@ def install_main(config, args, *, runner: Optional[Runner] = None,
 def _run_uninstall(kind, paths, uid, runner, is_tty, prompt) -> int:
     """--uninstall: show what would go, confirm, then remove owned files only."""
     present = [(file_state(p, ""), p) for p in paths]
+    # Read-only query, so a job whose files were deleted by hand is still found.
+    loaded = _is_loaded(kind, uid, runner)
     sys.stdout.write("grid-fleet uninstall plan (%s)\n" % kind)
     for state, p in present:
         what = {"new": "absent", "unchanged": "remove", "update": "remove"}.get(state, "leave (%s)" % state)
         sys.stdout.write("  %-14s %s\n" % (what, p))
-    if all(s == "new" for s, _p in present):
+    if loaded:
+        sys.stdout.write("  %-14s %s\n" % ("unload", " ".join(_unload_argv(kind, uid))))
+    if all(s == "new" for s, _p in present) and not loaded:
         sys.stdout.write("nothing to remove\n")
         return EXIT_OK
     if not is_tty():
@@ -521,10 +557,10 @@ def _run_uninstall(kind, paths, uid, runner, is_tty, prompt) -> int:
         sys.stdout.write("declined: nothing was changed\n")
         return EXIT_REFUSED
     try:
-        msgs, refused = _uninstall(kind, paths, uid, runner)
+        msgs, ok = _uninstall(kind, paths, uid, runner, loaded)
     except OSError as exc:
         sys.stderr.write("grid-fleet install: %s\n" % exc)
         return EXIT_REFUSED
     for m in msgs:
         sys.stdout.write(m + "\n")
-    return EXIT_REFUSED if refused else EXIT_OK
+    return EXIT_OK if ok else EXIT_REFUSED

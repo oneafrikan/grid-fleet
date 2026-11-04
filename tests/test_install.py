@@ -490,7 +490,8 @@ class TestUninstall(InstallCase):
         rc, out, _ = self.run_install("systemd", uninstall=True)
         self.assertEqual(rc, 0)
         self.assertIn("nothing to remove", out)
-        self.assertEqual(self.runner.calls, [])
+        # Only the read-only "is it registered?" query may run; nothing is unloaded.
+        self.assertEqual(self.runner.mutating(), [])
 
     def test_uninstall_needs_confirmation_and_a_tty(self):
         self.run_install("launchd", apply=True)
@@ -515,6 +516,174 @@ class TestUninstall(InstallCase):
         self.assertTrue(os.path.isfile(foreign))
         self.assertTrue(os.path.isfile(victim), "must not follow the symlink")
         self.assertEqual(self.runner.mutating(), [], "nothing unloaded for files we do not own")
+
+
+class TestApplyOrdering(InstallCase):
+    """QA fix 1: a failed write must not leave a previously loaded job unloaded."""
+
+    def _chmod_back(self, path):
+        self.addCleanup(os.chmod, path, 0o755)
+
+    def test_write_failure_in_readonly_dir_leaves_job_loaded(self):
+        if os.geteuid() == 0:
+            self.skipTest("root ignores directory permissions")
+        self.run_install("launchd", apply=True, interval=600)
+        old = _readb(self.plist)
+        self.assertTrue(self.runner.loaded)
+        self.runner.calls.clear()
+        agents = os.path.dirname(self.plist)
+        os.chmod(agents, 0o555)  # cannot create the temp file next to the plist
+        self._chmod_back(agents)
+        rc, _, err = self.run_install("launchd", apply=True, interval=300)
+        self.assertNotEqual(rc, 0)
+        self.assertTrue(err.strip(), "failure must be reported")
+        self.assertTrue(self.runner.loaded, "old job must still be loaded")
+        self.assertEqual(self.runner.mutating(), [], "nothing unloaded or loaded")
+        self.assertEqual(_readb(self.plist), old)
+
+    def test_injected_write_failure_leaves_job_loaded_on_both_platforms(self):
+        for kind in ("launchd", "systemd"):
+            self.runner = FakeRunner()
+            self.run_install(kind, apply=True, interval=600)
+            self.runner.calls.clear()
+            orig = install._write_atomic
+
+            def boom(path, text):
+                raise OSError("synthetic write failure")
+
+            install._write_atomic = boom
+            try:
+                rc, _, err = self.run_install(kind, apply=True, interval=300)
+            finally:
+                install._write_atomic = orig
+            self.assertNotEqual(rc, 0, kind)
+            self.assertIn("synthetic write failure", err)
+            self.assertTrue(self.runner.loaded, kind)
+            self.assertEqual(self.runner.mutating(), [], kind)
+
+    def test_success_still_unloads_before_loading(self):
+        self.run_install("launchd", apply=True, interval=600)
+        self.runner.calls.clear()
+        self.run_install("launchd", apply=True, interval=300)
+        self.assertEqual([c[1] for c in self.runner.mutating()], ["bootout", "bootstrap"])
+        self.assertEqual(plistlib.loads(_readb(self.plist))["StartInterval"], 300)
+
+
+class TestFailureLogHint(InstallCase):
+    """QA fix 2: the user can see where a failing tick is logged."""
+
+    def test_macos_plan_and_apply_show_log_path(self):
+        log = os.path.join(self.state, "timer.log")
+        _, plan, _ = self.run_install("launchd")
+        self.assertIn(log, plan)
+        _, out, _ = self.run_install("launchd", apply=True)
+        self.assertEqual(out.count(log), 2, "once in the plan, once after install")
+        self.assertIn("logs: " + log, out.split("installed\n", 1)[1])
+
+    def test_linux_plan_and_apply_show_journalctl(self):
+        cmd = "journalctl --user -u grid-fleet"
+        _, plan, _ = self.run_install("systemd")
+        self.assertIn(cmd, plan)
+        _, out, _ = self.run_install("systemd", apply=True)
+        self.assertIn(cmd, out.split("installed\n", 1)[1])
+
+
+class TestUninstallFailures(InstallCase):
+    """QA fix 3: unload failures surface in the exit code; hand-deleted files still unload."""
+
+    def test_failed_unload_is_reported_nonzero_but_files_are_still_removed(self):
+        for kind, fail in (("launchd", "bootout"), ("systemd", "disable")):
+            self.runner = FakeRunner()
+            self.run_install(kind, apply=True)
+            rc, out, _ = self.run_install(kind, uninstall=True,
+                                          runner=self.runner_failing(fail))
+            self.assertNotEqual(rc, 0, kind)
+            self.assertIn("unload FAILED", out)
+            self.assertIn("synthetic failure", out)
+            leftovers = [p for p in self.tree() if os.path.isfile(p)]
+            self.assertEqual(leftovers, [], "files still removed (%s)" % kind)
+
+    def runner_failing(self, fail):
+        r = FakeRunner(loaded=True, fail_on=fail)
+        return r
+
+    def test_failed_daemon_reload_is_reported_nonzero(self):
+        self.run_install("systemd", apply=True)
+        r = FakeRunner(loaded=True, fail_on="daemon-reload")
+        rc, out, _ = self.run_install("systemd", uninstall=True, runner=r)
+        self.assertNotEqual(rc, 0)
+        self.assertIn("daemon-reload FAILED", out)
+
+    def test_files_deleted_by_hand_but_job_registered_still_unloads(self):
+        for kind, argv in (("launchd", ["launchctl", "bootout", "gui/%d/io.grid-fleet.timer" % UID]),
+                           ("systemd", ["systemctl", "--user", "disable", "--now", "grid-fleet.timer"])):
+            r = FakeRunner(loaded=True)  # registered, but no files on disk
+            rc, out, err = self.run_install(kind, uninstall=True, runner=r)
+            self.assertEqual(rc, 0, err)
+            self.assertIn(argv, r.calls, kind)
+            self.assertFalse(r.loaded)
+            self.assertNotIn("nothing to remove", out)
+
+    def test_files_deleted_by_hand_and_unload_fails_is_nonzero(self):
+        r = FakeRunner(loaded=True, fail_on="bootout")
+        rc, out, _ = self.run_install("launchd", uninstall=True, runner=r)
+        self.assertNotEqual(rc, 0)
+        self.assertIn("unload FAILED", out)
+
+    def test_nothing_registered_and_no_files_does_not_unload(self):
+        r = FakeRunner(loaded=False)
+        rc, out, _ = self.run_install("launchd", uninstall=True, runner=r)
+        self.assertEqual(rc, 0)
+        self.assertIn("nothing to remove", out)
+        self.assertEqual(r.mutating(), [])
+
+
+class TestRenderEscapingAndFiles(InstallCase):
+    """QA fix 4: remaining test gaps."""
+
+    def test_cli_rejects_float_interval(self):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err), self.assertRaises(SystemExit) as cm:
+            cli.build_parser("install").parse_args(["install", "--interval", "600.0"])
+        self.assertEqual(cm.exception.code, 2)
+        self.assertIn("600", err.getvalue())
+
+    def test_quote_and_backslash_in_path_are_escaped_in_environment_line(self):
+        svc = install.render_systemd_service(PY, SCRIPT, '/a"b:/c\\d:/e')
+        self.assertIn('Environment="PATH=/a\\"b:/c\\\\d:/e"', svc)
+
+    def test_installed_files_are_mode_0644(self):
+        self.run_install("launchd", apply=True)
+        self.run_install("systemd", apply=True)
+        files = [self.plist] + [os.path.join(self.sd_dir, n)
+                                for n in ("grid-fleet.service", "grid-fleet.timer")]
+        for f in files:
+            self.assertEqual(os.stat(f).st_mode & 0o777, 0o644, f)
+
+    def test_no_temp_file_remains_after_success(self):
+        self.run_install("systemd", apply=True)
+        self.run_install("launchd", apply=True)
+        stray = [p for p in self.tree() if p.endswith(".tmp") or os.path.basename(p).startswith(".grid-fleet.")]
+        self.assertEqual(stray, [])
+
+    def test_failed_atomic_write_keeps_old_file_and_leaves_no_temp(self):
+        target = os.path.join(self.work, "unit.service")
+        with open(target, "w") as fh:
+            fh.write("old content")
+        orig = os.replace
+
+        def boom(src, dst):
+            raise OSError("synthetic rename failure")
+
+        os.replace = boom
+        try:
+            with self.assertRaises(OSError):
+                install._write_atomic(target, "new content")
+        finally:
+            os.replace = orig
+        self.assertEqual(_read(target), "old content")
+        self.assertEqual(sorted(os.listdir(self.work)),
+                         sorted(["home", "unit.service"]), "no temp file left behind")
 
 
 class TestNothingRealIsTouched(InstallCase):
