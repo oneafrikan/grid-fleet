@@ -602,16 +602,75 @@ class TestViewMain(unittest.TestCase):
         tty.isatty.return_value = True
         return mock.patch.object(sys, "stdin", tty), mock.patch.object(sys, "stdout", tty)
 
+    # --- NO_COLOR must not start colour at all (F6) -----------------------------------
+
+    def _config(self):
+        # An empty state dir: the dashboard then renders "no hosts", which is all these need.
+        tmp = tempfile.TemporaryDirectory(prefix="gf-view-")
+        self.addCleanup(tmp.cleanup)
+        return cfg.Config(state_dir=tmp.name)
+
+    def _fake_terminal(self, stdscr_keys):
+        """Patch the real `curses` module functions that view_main would call, so nothing
+        touches a terminal. Returns (log, stdscr). `log` records the order of setup/restore
+        calls."""
+        log = []
+        stdscr = FakeScreen(stdscr_keys)
+        stdscr.keypad = lambda flag: log.append(("keypad", flag))
+        patches = mock.patch.multiple(
+            "curses",
+            initscr=lambda: (log.append(("initscr",)), stdscr)[1],
+            noecho=lambda: log.append(("noecho",)),
+            cbreak=lambda: log.append(("cbreak",)),
+            echo=lambda: log.append(("echo",)),
+            nocbreak=lambda: log.append(("nocbreak",)),
+            endwin=lambda: log.append(("endwin",)),
+            start_color=lambda: log.append(("start_color",)),
+            has_colors=lambda: True,
+            curs_set=lambda v: log.append(("curs_set", v)),
+        )
+        return log, stdscr, patches
+
+    def test_no_color_never_calls_start_color_and_restores_the_terminal(self):
+        log, _screen, patches = self._fake_terminal([Q])
+        a, b = self._tty()
+        with a, b, patches, mock.patch.dict(os.environ, {"NO_COLOR": "1", "GRID_FLEET_NOW": str(NOW)}):
+            rc = view.view_main(self._config(), None)
+        self.assertEqual(rc, 0)
+        names = [c[0] for c in log]
+        self.assertNotIn("start_color", names)
+        self.assertEqual(names[:4], ["initscr", "noecho", "cbreak", "keypad"])
+        # Same restore sequence as curses.wrapper.
+        self.assertEqual(names[-4:], ["keypad", "echo", "nocbreak", "endwin"])
+
+    def test_no_color_route_restores_the_terminal_when_the_loop_raises(self):
+        log, screen, patches = self._fake_terminal([])  # getch pops from []: IndexError mid-loop
+        a, b = self._tty()
+        with a, b, patches, mock.patch.dict(os.environ, {"NO_COLOR": "1", "GRID_FLEET_NOW": str(NOW)}):
+            with self.assertRaises(IndexError):
+                view.view_main(self._config(), None)
+        self.assertEqual([c[0] for c in log][-4:], ["keypad", "echo", "nocbreak", "endwin"])
+
+    def test_color_route_still_uses_curses_wrapper(self):
+        a, b = self._tty()
+        with a, b, mock.patch.dict(os.environ, {"NO_COLOR": ""}), \
+                mock.patch("curses.wrapper") as wrapper, mock.patch("curses.initscr") as initscr:
+            view.view_main(cfg.Config(), None)
+        wrapper.assert_called_once()
+        initscr.assert_not_called()
+
     def test_ctrl_c_is_a_normal_exit(self):
         a, b = self._tty()
-        with a, b, mock.patch("curses.wrapper", side_effect=KeyboardInterrupt) as wrapper:
+        with a, b, mock.patch.dict(os.environ, {"NO_COLOR": ""}), \
+                mock.patch("curses.wrapper", side_effect=KeyboardInterrupt) as wrapper:
             rc = view.view_main(cfg.Config(), None)
         self.assertEqual(rc, 0)
         self.assertIs(wrapper.call_args[0][0], view.run_loop)  # run inside curses.wrapper
 
     def test_other_exceptions_propagate(self):
         a, b = self._tty()
-        with a, b, mock.patch("curses.wrapper", side_effect=RuntimeError("boom")):
+        with a, b, mock.patch.dict(os.environ, {"NO_COLOR": ""}), \
+                mock.patch("curses.wrapper", side_effect=RuntimeError("boom")):
             with self.assertRaises(RuntimeError):
                 view.view_main(cfg.Config(), None)
 
