@@ -4,7 +4,7 @@
 
 `grid-fleet`: terminal dashboard (Python, stdlib only) for Claude Code sessions, tokens,
 subagent usage and Max-plan limits across a fleet of machines.
-Status: spec approved (`openspec/changes/fleet-tracer-bullet/`). Groups 1-4 built and QA-verified; Group 5 is a HUMAN checkpoint; groups 6-9 not started.
+Status: spec approved (`openspec/changes/fleet-tracer-bullet/`). Groups 1-8 built (tracer bullet, leaderboard and sparkline, limits strip, installers); Groups 1-4 QA-verified, QA and security-gate results for 6-8 pending merge. Group 5 and the other HUMAN checkpoints are pending; Group 9 (docs) in progress.
 
 ## Hard constraints
 
@@ -25,6 +25,7 @@ Status: spec approved (`openspec/changes/fleet-tracer-bullet/`). Groups 1-4 buil
   which hosts) lives outside this repo.
 - Privacy contract: with any config, no snapshot field contains a cwd, session name,
   project directory name or session id. There is no opt-in in v1.
+  Subagent type names (built-in and custom) ARE sent, unfiltered (maintainer decision; documented in the README Privacy section).
 - Collector never prints or stores transcript text. It reads `type`, `message.id`, `message.usage`,
   `timestamp` from transcript lines and `agentType` from meta files only.
 - Comment code generously: intent, not syntax.
@@ -41,9 +42,9 @@ Status: spec approved (`openspec/changes/fleet-tracer-bullet/`). Groups 1-4 buil
 
 ## Build order
 
-1. Groups 1-4 in `tasks.md` (tracer bullet: skeleton, collect, push, minimal view).
-2. Group 5 is a HUMAN checkpoint. Stop there and wait.
-3. Then groups 6-9 (leaderboard, limits, installers, docs). Tasks marked `HUMAN:` are for the human only.
+1. Groups 1-4 in `tasks.md` (tracer bullet: skeleton, collect, push, minimal view): done.
+2. Group 5 is a HUMAN checkpoint (not formally ticked).
+3. Groups 6-8 (leaderboard, limits, installers): built. Group 9 (docs): in progress. Tasks marked `HUMAN:` are for the human only.
 
 Intended specialist agents (the-grid names):
 
@@ -52,6 +53,7 @@ Intended specialist agents (the-grid names):
 | 1 | grid-backend-dev + grid-sdet |
 | 2, 3 | grid-backend-dev |
 | 4 | grid-frontend-dev |
+| 6 | grid-backend-dev (collect) + grid-frontend-dev (view) |
 | 7, 8 | core-platform-engineer |
 | Gate after push + install | grid-security-reviewer, then grid-qa-engineer |
 | Docs (9) | grid-technical-writer |
@@ -67,6 +69,6 @@ Intended specialist agents (the-grid names):
 
 ## Git
 
-- A private remote `origin` exists (`oneafrikan/grid-fleet`, pushed over the `github-personal` ssh alias). Commit and push `main` after each logical unit.
+- A private remote `origin` exists (`oneafrikan/grid-fleet`, pushed over ssh with the maintainer's personal-account identity). Commit and push `main` after each logical unit.
 - Do not change the remote, flip it public, or create other remotes. The public flip happens only after the 9.3 public-readiness grep passes (see `TODO.md`).
 - Commit style: `type(scope): subject` (feat, fix, docs, spec, chore). Commit after each logical unit.
