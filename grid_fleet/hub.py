@@ -48,6 +48,17 @@ MAX_FILE_BYTES = 256 * 1024
 KNOWN_SCHEMAS = (1,)
 # Stale when age > STALE_FACTOR * interval_s (design.md "Staleness").
 STALE_FACTOR = 2
+# The snapshot's own interval_s is untrusted: a host claiming 10**12 would never go stale.
+# Values above this are clamped to it. The installer only allows 300/600/900, so every
+# legitimate snapshot is far below.
+MAX_INTERVAL_S = 3600
+# Most inbox files read per scan; the rest are counted as skipped. Real fleets have a dozen
+# hosts. Bounds the work (and memory) a directory full of files can cause per refresh.
+MAX_INBOX_FILES = 512
+# `limits.captured_at` may be at most this far ahead of the hub clock (spoke clock skew).
+# Further ahead is not believable and would beat every honest capture forever, so such a
+# snapshot's limits are ignored (the windows show as unknown).
+MAX_CAPTURE_SKEW_S = 300
 # Largest count the reader believes. Real token counts stay far below this; a snapshot
 # claiming more (e.g. 10**400, which fits in the file size cap) is treated as "not
 # promised" so the view never does float maths on an astronomically large int.
@@ -250,12 +261,17 @@ def inbox_signature(state_dir: str) -> tuple:
     Stat only, no reads. Compare to the previous value; re-scan when it differs.
     """
     sig = []
-    for n in _list_inbox(state_dir):
+    names = _list_inbox(state_dir)
+    for n in names[:MAX_INBOX_FILES]:  # same cap as scan_inbox: bounded stat work per poll
         try:
             st = os.stat(os.path.join(inbox_dir(state_dir), n))
         except OSError:
             continue  # vanished between listdir and stat (atomic replace); next poll sees it
         sig.append((n, st.st_mtime_ns, st.st_size))
+    if len(names) > MAX_INBOX_FILES:
+        # Files past the cap are not stat-ed, but their number feeds the footer's skipped
+        # count, so a change in it must still change the signature.
+        sig.append(("<over-cap>", len(names) - MAX_INBOX_FILES, 0))
     return tuple(sig)
 
 
@@ -292,10 +308,15 @@ def _load_one(path: str) -> Optional[Entry]:
 
 
 def scan_inbox(state_dir: str) -> InboxScan:
-    """Read every inbox file once. Dotfiles are not even opened; see module docstring."""
+    """Read every inbox file once. Dotfiles are not even opened; see module docstring.
+
+    At most MAX_INBOX_FILES files are read (name order, so deterministic); the rest are not
+    opened and are counted as skipped.
+    """
     entries = []  # type: List[Entry]
-    skipped = 0
-    for n in _list_inbox(state_dir):
+    names = _list_inbox(state_dir)
+    skipped = max(0, len(names) - MAX_INBOX_FILES)
+    for n in names[:MAX_INBOX_FILES]:
         entry = _load_one(os.path.join(inbox_dir(state_dir), n))
         if entry is None:
             skipped += 1
@@ -320,7 +341,7 @@ def _interval(snapshot: dict) -> int:
     v = snapshot.get("interval_s")
     if isinstance(v, bool) or not isinstance(v, int) or v <= 0:
         return DEFAULT_INTERVAL_S
-    return v
+    return min(v, MAX_INTERVAL_S)  # a hostile huge value must not make a dead host look fresh
 
 
 def _section(snapshot: dict, key: str) -> Optional[dict]:
@@ -421,17 +442,19 @@ def _account_label(snapshot: dict) -> str:
     return label or DEFAULT_ACCOUNT_LABEL
 
 
-def _snapshot_limits(snapshot: dict) -> Tuple[Optional[int], dict]:
+def _snapshot_limits(snapshot: dict, now: int) -> Tuple[Optional[int], dict]:
     """(captured_at, limits dict) from a snapshot; (None, {}) when there is nothing usable.
 
     Without a believable captured_at the snapshot cannot take part in "greatest captured_at",
-    so its limits are ignored rather than guessed at.
+    so its limits are ignored rather than guessed at. "Believable" includes not being dated
+    more than MAX_CAPTURE_SKEW_S after the hub clock: a future stamp would otherwise win the
+    "greatest captured_at" contest for good.
     """
     lim = snapshot.get("limits")
     if not isinstance(lim, dict):
         return None, {}
     captured = _epoch(lim.get("captured_at"))
-    if captured is None:
+    if captured is None or captured > now + MAX_CAPTURE_SKEW_S:
         return None, {}
     return captured, lim
 
@@ -473,7 +496,7 @@ def build_limits(fresh_entries, now: int) -> Tuple[AccountLimits, ...]:
     by_account = {}  # type: dict
     for entry in fresh_entries:
         by_account.setdefault(_account_label(entry.snapshot), []).append(
-            _snapshot_limits(entry.snapshot))
+            _snapshot_limits(entry.snapshot, now))
     if not by_account:
         return (AccountLimits(""),)
     blocks = []

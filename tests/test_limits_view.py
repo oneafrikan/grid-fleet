@@ -140,8 +140,10 @@ class TestAggregation(LimitsCase):
         self.assertEqual(self.hubstate().limits, (hub.AccountLimits(""),))
 
     def test_clock_skew_between_hosts_does_not_matter_for_age(self):
-        # Age is hub now - captured_at; a capture stamped in the future clamps to 0.
-        self.put("alpha", limits=both(captured_at=NOW + 3600))
+        # Age is hub now - captured_at; a capture stamped slightly in the future (within the
+        # hub's skew allowance, S5) clamps to 0. One far in the future is ignored: see
+        # test_hub.TestHostileFreshnessFields.
+        self.put("alpha", limits=both(captured_at=NOW + 60))
         self.assertEqual(self.block().five_hour.age_s, 0)
 
     def test_account_label_is_terminal_safe(self):
