@@ -33,7 +33,8 @@ Meaning never depends on colour: stale rows say `unknown` and `stale 41m`, never
 reported rows say `(never reported)`; limit bars always print their percentage, the
 reset time and `as of <age> ago`, and an unknown window says `unknown`.
 
-Not in this unit: the sparkline/leaderboard panel (group 6). No placeholder is drawn.
+The sparkline + subagent leaderboard panel (task 6.2) sits between the total row and the
+footer, in whatever rows the hosts table leaves free (hosts have priority; see _panel_lines).
 The limits strip (task 7.4, view half) sits between the title and the HOSTS rule: one block
 of three rows (header, 5h, 7d) per account, fed by hub.HubState.limits.
 """
@@ -61,17 +62,23 @@ MIN_WIDTH, MIN_HEIGHT = 60, 16  # design.md: below this, one-line message instea
 
 
 class _Glyphs(object):
-    def __init__(self, tl, tr, bl, br, h, v, lt, rt, sep, ell, bar_full, bar_empty, bar_part):
+    def __init__(self, tl, tr, bl, br, h, v, lt, rt, sep, ell, bar_full, bar_empty, bar_part,
+                 td, tu, spark):
         self.tl, self.tr, self.bl, self.br = tl, tr, bl, br
         self.h, self.v, self.lt, self.rt = h, v, lt, rt
         self.sep, self.ell = sep, ell
         # Limit bar: filled cell, empty cell, and 1/8..7/8 partial cells (none in ASCII).
         self.bar_full, self.bar_empty, self.bar_part = bar_full, bar_empty, bar_part
+        # T junctions (rule above / below a vertical divider) and the 8 sparkline levels,
+        # lowest first. Level 0 is reserved for a zero day; non-zero days use levels 1-7.
+        self.td, self.tu, self.spark = td, tu, spark
 
 
 UNICODE = _Glyphs("┌", "┐", "└", "┘", "─", "│", "├", "┤", "·", "…",
-                  "█", "░", ("▏", "▎", "▍", "▌", "▋", "▊", "▉"))
-ASCII = _Glyphs("+", "+", "+", "+", "-", "|", "+", "+", "|", "~", "#", ".", ())
+                  "█", "░", ("▏", "▎", "▍", "▌", "▋", "▊", "▉"),
+                  "┬", "┴", "▁▂▃▄▅▆▇█")
+ASCII = _Glyphs("+", "+", "+", "+", "-", "|", "+", "+", "|", "~", "#", ".", (),
+                "+", "+", "_.,-=+*#")
 
 # Fixed column widths (characters). Counts are 7 wide so `unknown` fits in a cell.
 W_COUNT, W_TOK = 7, 8
@@ -90,6 +97,15 @@ LIMIT_BAR_MAX, LIMIT_BAR_MIN = 20, 8  # bar width range; below the min, tail tex
 W_PCT = 7  # percentage cell; wide enough for `unknown`
 LIMIT_OLD_S = 3600  # a capture older than this renders dim (design.md "Limits freshness")
 LIMIT_LABELS = (("5h", "five_hour"), ("7d", "seven_day"))
+
+# Sparkline / leaderboard panel geometry (task 6.2).
+PANEL_MIN_ROWS = 2  # header rule + one content row; below this the panel is not drawn
+SPARK_ROWS = 2  # glyph row + date-label row
+SIDE_BY_SIDE_MIN_WIDTH = 72  # narrower than this: leaderboard only, full width
+SPARK_COL_MIN = 30  # inner width of the sparkline column
+W_RANK, W_INV, W_OUT = 2, 6, 6  # rank, invocations and output-token cell widths
+BOARD_BAR_MAX, BOARD_BAR_MIN = 16, 4  # proportional bar width range; below the min, no bar
+BOARD_TYPE_MAX, BOARD_TYPE_MIN = 20, 8  # type column width range
 _WEEKDAYS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")  # fixed English, not locale
 
 
@@ -387,6 +403,126 @@ def _limit_lines(blocks, now: int, inner: int, g: _Glyphs, max_lines: int) -> Li
     return rows
 
 
+# ---------------------------------------------------------------------------
+# Sparkline + subagent leaderboard panel (task 6.2)
+# ---------------------------------------------------------------------------
+
+
+def _compact(n: int, width: int) -> str:
+    """fmt_tokens(n) right-aligned in a `width` cell. A value too wide for the cell (only
+    possible with absurd input) shows as 9999+ rather than being cut to a wrong number."""
+    text = fmt_tokens(n)
+    if len(text) > width:
+        text = "9" * (width - 1) + "+"
+    return text.rjust(width)
+
+
+def _spark_glyphs(values: List[int], g: _Glyphs) -> str:
+    """One glyph per value, scaled to the largest value in the window.
+
+    Integer maths only (a huge value must not go through float). A zero day is level 0 and
+    any non-zero day is at least level 1, so "tiny" and "nothing" never look the same. All
+    zero gives a flat line of level 0.
+    """
+    top = max(values) if values else 0
+    steps = len(g.spark) - 2  # 6: non-zero days spread over levels 1..7
+    out = []
+    for v in values:
+        out.append(g.spark[0] if v <= 0 or top <= 0 else g.spark[1 + (v * steps) // top])
+    return " ".join(out)
+
+
+def _spark_rows(by_day, lw: int, g: _Glyphs) -> List[List[Span]]:
+    """The sparkline column: glyph row with the peak value in words, then first/last date.
+
+    The `max` label means the chart is readable without colour or even without the glyphs.
+    """
+    if not by_day:
+        return [[(" ", PLAIN), ("no data", DIM)]]
+    values = [d.output for d in by_day]
+    row1 = [(" ", PLAIN), (_spark_glyphs(values, g), PLAIN),
+            ("  max %s" % fmt_tokens(max(values)), PLAIN)]
+    first, last = by_day[0].day[5:], by_day[-1].day[5:]  # MM-DD (the year is noise at a glance)
+    if len(by_day) == 1:
+        label = first
+    else:
+        # first ........ last, as wide as the column allows (capped so it stays compact)
+        dots = max(1, min(lw - 2, 24) - len(first) - len(last) - 2)
+        label = "%s %s %s" % (first, "." * dots, last)
+    return [row1, [(" ", PLAIN), (label, DIM)]]
+
+
+def _board_rows(board, n: int, rw: int, g: _Glyphs) -> List[List[Span]]:
+    """At most `n` leaderboard rows in a column `rw` wide: rank, type, [bar], invocations,
+    [output tokens]. The bar is proportional to the top row; the dim output column and then
+    the bar are dropped as the column narrows (the invocation number is never dropped).
+    """
+    if not board:
+        return [[(" ", PLAIN), ("no subagent data", DIM)]]
+    rows = board[:n]
+    top = board[0].invocations  # sorted desc, so the first row is the scale
+    tw = max(BOARD_TYPE_MIN, min(BOARD_TYPE_MAX, max(len(r.type) for r in rows)))
+    # " rr type inv": lead space, rank, gap, type, gap, invocations.
+    base = 1 + W_RANK + 1 + tw + 1 + W_INV
+    if rw < base:  # pathological narrowness: shrink the type column, never below 4
+        tw = max(4, tw - (base - rw))
+        base = 1 + W_RANK + 1 + tw + 1 + W_INV
+    extra = rw - base
+    use_out = any(r.output is not None for r in rows) and extra - (1 + W_OUT) >= 1 + BOARD_BAR_MIN
+    room = extra - ((1 + W_OUT) if use_out else 0) - 1  # -1: the gap before the bar
+    bar_w = min(BOARD_BAR_MAX, room) if room >= BOARD_BAR_MIN else 0
+    out = []
+    for i, r in enumerate(rows):
+        spans = [(" ", PLAIN), (_right(str(i + 1), W_RANK), PLAIN), (" ", PLAIN),
+                 (_clip(r.type, tw, g.ell).ljust(tw), BOLD), (" ", PLAIN)]
+        if bar_w:
+            # At least one cell for any non-zero row, so a small type is still visible.
+            filled = max(1, r.invocations * bar_w // top)
+            spans += [((g.bar_full * filled).ljust(bar_w), PLAIN), (" ", PLAIN)]
+        spans.append((_compact(r.invocations, W_INV), BOLD))
+        if use_out:
+            spans += [(" ", PLAIN),
+                      (_compact(r.output, W_OUT) if r.output is not None else _right("-", W_OUT), DIM)]
+        out.append(spans)
+    return out
+
+
+def _panel_lines(state: hub.HubState, width: int, inner: int, g: _Glyphs, rows: int):
+    """The panel in `rows` free rows (header rule included): (lines, split_x or None).
+
+    Priority, set by the caller: the hosts table first, the panel gets what is left. Then:
+      - fewer than PANEL_MIN_ROWS rows: no panel;
+      - wide enough and at least SPARK_ROWS content rows: sparkline left, leaderboard right,
+        the leaderboard truncated to the rows available (split_x is the divider column, so
+        the caller can draw the matching T junction in the rule below);
+      - otherwise (narrow terminal, or a single content row): the sparkline is dropped and
+        the leaderboard takes the full width, still truncated to fit.
+    """
+    if rows < PANEL_MIN_ROWS:
+        return [], None
+    content = rows - 1
+    board = state.agents
+    if width >= SIDE_BY_SIDE_MIN_WIDTH and content >= SPARK_ROWS:
+        lw = max(SPARK_COL_MIN, (inner - 1) * 2 // 5)
+        rw = inner - lw - 1
+        n = min(content, max(SPARK_ROWS, len(board)))
+        left = _spark_rows(state.by_day, lw, g)
+        right = _board_rows(board, n, rw - 1, g)  # -1: keep a margin before the border
+        head = (_rule(g, g.lt, g.td, lw + 2, "OUTPUT TOKENS / DAY (7d)")
+                + _rule(g, g.h, g.rt, rw + 1, "SUBAGENTS (7d, invocations)"))
+        body = []
+        for i in range(n):
+            body.append([(g.v, PLAIN)]
+                        + _fit(left[i] if i < len(left) else [], lw)
+                        + [(g.v, PLAIN)]
+                        + _fit(right[i] if i < len(right) else [], rw)
+                        + [(g.v, PLAIN)])
+        return [head] + body, lw + 1
+    n = min(content, max(1, len(board)))
+    head = _rule(g, g.lt, g.rt, width, "SUBAGENTS (7d, invocations)")
+    return [head] + [_boxed(r, inner, g) for r in _board_rows(board, n, inner - 1, g)], None
+
+
 def _stamp(now: int) -> str:
     # Hub-local wall time; the format is fixed so output is stable apart from the zone.
     return time.strftime("%Y-%m-%d %H:%M", time.localtime(now))
@@ -435,8 +571,18 @@ def render(state: hub.HubState, width: int, height: int, ascii_mode: bool = Fals
     lines += [_rule(g, g.lt, g.rt, width, "HOSTS"),
               _boxed(_head_line(hw, age_w), inner, g)]
     lines += [_boxed(b, inner, g) for b in body]
-    lines += [_boxed(_total_line(state, hw, age_w), inner, g),
-              _rule(g, g.lt, g.rt, width),
+    lines += [_boxed(_total_line(state, hw, age_w), inner, g)]
+
+    # Whatever the hosts table left free goes to the sparkline/leaderboard panel. The hosts
+    # come first: a truncated table ("N more hosts") means no panel at all.
+    free = avail - len(body)
+    panel, split = _panel_lines(state, width, inner, g, free if len(body) < avail else 0)
+    lines += panel
+    if split is None:
+        divider = _rule(g, g.lt, g.rt, width)
+    else:  # the vertical divider ends here: close it with a T junction
+        divider = _fit(_rule(g, g.lt, g.tu, split + 1) + _rule(g, g.h, g.rt, width - split - 1), width)
+    lines += [divider,
               _boxed(_footer_line(state, inner, g), inner, g),
               _rule(g, g.bl, g.br, width)]
 

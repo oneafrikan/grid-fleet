@@ -5,6 +5,7 @@ Claude tree or a real inbox. The hub tests and the render tests share it.
 
     make_snapshot(host, **overrides) -> dict      a full, valid schema-1 snapshot
     make_limits / limit_window                    the snapshot `limits` section (task 7.4)
+    agent_row / make_agents / by_day_rows / make_tokens   `agents` and `tokens.by_day` (task 6.3)
     NULL                                          pass as a section value to get JSON null
     write_inbox_file(state_dir, name, obj, mtime) write inbox/<name>.json, then os.utime
     snapshot_tree(state_dir)                      {relpath: (bytes, mtime_ns)} for read-only checks
@@ -60,6 +61,39 @@ def make_limits(captured_at: int = COLLECTED_AT, five_hour=None, seven_day=None)
     if seven_day is not None:
         out["seven_day"] = seven_day
     return out
+
+
+def agent_row(type, invocations, output=0) -> dict:
+    """One `agents.last_7d` row, shaped as design.md "Snapshot" / snapshot-collect define it."""
+    return {"type": type, "invocations": invocations, "output": output}
+
+
+def make_agents(*rows) -> dict:
+    """A snapshot `agents` section from agent_row(...) rows (kept in the order given; the
+    collector sorts, but the hub must not rely on that). Pass as make_snapshot(agents=...)."""
+    return {"last_7d": list(rows)}
+
+
+def by_day_rows(first_day: str, outputs) -> list:
+    """`tokens.by_day` entries for consecutive UTC dates starting at `first_day` (YYYY-MM-DD),
+    one per value in `outputs`: {"day", "output", "input", "cache_creation", "cache_read"}."""
+    import datetime
+
+    start = datetime.date(int(first_day[:4]), int(first_day[5:7]), int(first_day[8:]))
+    return [
+        dict(day=(start + datetime.timedelta(days=i)).isoformat(), output=o,
+             input=0, cache_creation=0, cache_read=0)
+        for i, o in enumerate(outputs)
+    ]
+
+
+def make_tokens(by_day=None) -> dict:
+    """The default `tokens` section with a chosen `by_day` list (default empty)."""
+    return {
+        "last_24h": tokens_window(412000, 91000, 1200000, 55000000),
+        "last_7d": tokens_window(3100000, 640000, 9000000, 420000000),
+        "by_day": list(by_day or []),
+    }
 
 
 def make_snapshot(

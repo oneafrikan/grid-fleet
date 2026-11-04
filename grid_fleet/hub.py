@@ -28,11 +28,14 @@ Public API:
     read_hub(state_dir, now, expected_hosts=()) -> HubState scan + build in one call
     Total(value, complete)                       a column total; see its docstring
     build_limits(fresh_entries, now)             PURE: per-account limits blocks (task 7.4)
+    build_agents / build_by_day(fresh_entries)   PURE: leaderboard + sparkline data (task 6.2)
 """
 
+import datetime
 import json
 import math
 import os
+import re
 import stat
 from dataclasses import dataclass
 from typing import Iterable, List, Optional, Tuple
@@ -60,6 +63,15 @@ MAX_PCT = 1000.0
 # remote machine and must not put escape sequences on the terminal), bounded length.
 ACCOUNT_LABEL_MAX = 32
 DEFAULT_ACCOUNT_LABEL = "default"
+
+# Leaderboard / sparkline (task 6.2). Snapshot lists are untrusted: bound how much of each
+# one is read so a hostile 256 KiB file full of tiny rows cannot make the view do unbounded
+# work, and bound what reaches the screen.
+LEADERBOARD_SIZE = 8  # design.md: top 8 agent types by invocations
+SPARK_DAYS = 7  # by_day carries 7 UTC dates
+MAX_AGENT_ROWS_PER_HOST = 200  # rows of agents.last_7d read per host (real fleets: a dozen)
+MAX_BY_DAY_PER_HOST = 14  # rows of tokens.by_day read per host (real: exactly 7)
+AGENT_TYPE_MAX = 24  # agent type labels are cut to this many characters
 
 FRESH = "fresh"
 STALE = "stale"
@@ -170,6 +182,28 @@ class AccountLimits:
 
 
 @dataclass(frozen=True)
+class AgentRow:
+    """One leaderboard row: an agent type summed across the fresh hosts.
+
+    type         terminal-safe label (printable ASCII, at most AGENT_TYPE_MAX characters).
+    invocations  sum of agents.last_7d[].invocations over fresh hosts (> 0).
+    output       sum of the believable `output` figures, or None when no host promised one.
+    """
+
+    type: str
+    invocations: int
+    output: Optional[int] = None
+
+
+@dataclass(frozen=True)
+class DayTotal:
+    """Output tokens for one UTC date (`YYYY-MM-DD`), summed across the fresh hosts."""
+
+    day: str
+    output: int
+
+
+@dataclass(frozen=True)
 class HubState:
     now: int
     hosts: Tuple[HostState, ...]  # sorted by name; includes stale and never-reported
@@ -184,6 +218,11 @@ class HubState:
     # One block per account label among the fresh hosts, sorted by label. Never empty:
     # with nothing to show, one unknown block (see build_limits).
     limits: Tuple[AccountLimits, ...] = ()
+    # Task 6.2: top LEADERBOARD_SIZE agent types (invocations desc, then type asc) and the
+    # last SPARK_DAYS UTC dates of output tokens, both over FRESH hosts only. Empty tuple
+    # means "no fresh host reported it" (the view says so in words; never a row of zeros).
+    agents: Tuple[AgentRow, ...] = ()
+    by_day: Tuple[DayTotal, ...] = ()
 
     @property
     def host_count(self) -> int:
@@ -448,6 +487,96 @@ def build_limits(fresh_entries, now: int) -> Tuple[AccountLimits, ...]:
     return tuple(blocks)
 
 
+# ---------------------------------------------------------------------------
+# Leaderboard and sparkline (task 6.2)
+# ---------------------------------------------------------------------------
+
+# A by_day `day` must look exactly like this AND be a real calendar date; anything else
+# (hostile text, "2026-13-45") is dropped rather than shown or used as a sort key.
+_DAY_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$")
+
+
+def _ascii_label(raw, max_len: int) -> str:
+    """Printable ASCII only (everything else becomes `?`), stripped, cut to max_len.
+
+    Snapshot strings come from remote machines; an ESC or other control byte must never
+    reach the terminal. Empty after cleaning returns "".
+    """
+    return "".join(c if " " <= c <= "~" else "?" for c in raw).strip()[:max_len]
+
+
+def _valid_day(value) -> Optional[str]:
+    """`value` if it is a real `YYYY-MM-DD` date string, else None."""
+    if not isinstance(value, str) or not _DAY_RE.match(value):
+        return None
+    try:
+        datetime.date(int(value[:4]), int(value[5:7]), int(value[8:]))
+    except ValueError:
+        return None
+    return value
+
+
+def build_agents(fresh_entries) -> Tuple[AgentRow, ...]:
+    """Top agent types by invocations summed across the FRESH hosts' `agents.last_7d` (pure).
+
+    Stale hosts are excluded by the caller. A host whose `agents` is null (or not the
+    promised shape) contributes nothing and is not an error. Per row, `type` must be text
+    and `invocations` a believable count > 0 (see _count); a row failing either is ignored
+    on its own, the host's other rows still count. `main` is an ordinary type here.
+    Sort: invocations desc; ties by type name asc (the spec only says "invocations desc",
+    so the tie-break is ours: deterministic, so the display does not jitter between ticks).
+    """
+    inv = {}  # type: dict
+    out = {}  # type: dict
+    for entry in fresh_entries:
+        agents = _section(entry.snapshot, "agents")
+        rows = agents.get("last_7d") if agents else None
+        if not isinstance(rows, list):
+            continue
+        for row in rows[:MAX_AGENT_ROWS_PER_HOST]:
+            if not isinstance(row, dict) or not isinstance(row.get("type"), str):
+                continue
+            n = _count(row.get("invocations"))
+            if not n:  # None (not promised) and 0 (nothing to rank) both drop out
+                continue
+            # A type that cleans to nothing is reported like a missing meta file would be.
+            label = _ascii_label(row["type"], AGENT_TYPE_MAX) or "unknown"
+            inv[label] = inv.get(label, 0) + n
+            o = _count(row.get("output"))
+            if o is not None:
+                out[label] = out.get(label, 0) + o
+    ranked = sorted(inv.items(), key=lambda kv: (-kv[1], kv[0]))[:LEADERBOARD_SIZE]
+    return tuple(AgentRow(t, n, out.get(t)) for t, n in ranked)
+
+
+def build_by_day(fresh_entries) -> Tuple[DayTotal, ...]:
+    """Output tokens per UTC date summed across FRESH hosts' `tokens.by_day` (pure).
+
+    Aligned by the `day` string, not by position, so hosts whose windows end on different
+    dates still line up. A host with null/short/odd `by_day` contributes the days it has.
+    Rows with an invalid date or an unbelievable `output` are ignored; a repeated date
+    within one host counts once (first wins). Returns the most recent SPARK_DAYS dates that
+    any fresh host reported, oldest first; a date no host reported is simply absent
+    (unknown, not zero).
+    """
+    totals = {}  # type: dict
+    for entry in fresh_entries:
+        tokens = _section(entry.snapshot, "tokens")
+        rows = tokens.get("by_day") if tokens else None
+        if not isinstance(rows, list):
+            continue
+        seen = set()
+        for row in rows[:MAX_BY_DAY_PER_HOST]:
+            if not isinstance(row, dict):
+                continue
+            day, o = _valid_day(row.get("day")), _count(row.get("output"))
+            if day is None or o is None or day in seen:
+                continue
+            seen.add(day)
+            totals[day] = totals.get(day, 0) + o
+    return tuple(DayTotal(d, totals[d]) for d in sorted(totals)[-SPARK_DAYS:])
+
+
 def build_state(scan: InboxScan, now: int, expected_hosts: Iterable[str] = ()) -> HubState:
     """Pure: scan + hub clock + expected hosts -> everything the view needs.
 
@@ -476,6 +605,8 @@ def build_state(scan: InboxScan, now: int, expected_hosts: Iterable[str] = ()) -
         cache_24h=_sum(h.cache_24h for h in fresh),
         cache_7d=_sum(h.cache_7d for h in fresh),
         limits=build_limits(fresh_entries, now),
+        agents=build_agents(fresh_entries),
+        by_day=build_by_day(fresh_entries),
     )
 
 
