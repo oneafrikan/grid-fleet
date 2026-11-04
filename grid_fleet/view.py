@@ -21,15 +21,21 @@ the span texts of a line gives exactly what is shown on that row. Tags:
     busy      busy-session counts above zero (cyan)
     waiting   waiting-session counts above zero, "files skipped" (yellow)
     grey      `unknown`, stale/never-reported rows (grey)
-    dim       muted secondary lines such as in+cache tokens (dim)
+    dim       muted secondary lines such as in+cache tokens (dim); limit bars whose
+              capture is more than an hour old
+    ok        limit bar below 60 % (green)
+    warn      limit bar 60-84 % (yellow)
+    crit      limit bar 85 % and above (red)
 
 With color=False (NO_COLOR, or a terminal without colour) render() emits ONLY
 `plain` and `bold`, so "no colour attributes" is checkable on the render output.
 Meaning never depends on colour: stale rows say `unknown` and `stale 41m`, never-
-reported rows say `(never reported)`.
+reported rows say `(never reported)`; limit bars always print their percentage, the
+reset time and `as of <age> ago`, and an unknown window says `unknown`.
 
-Not in this unit: the sparkline/leaderboard panel (group 6) and the limits strip
-(group 7). No placeholders are drawn for them.
+Not in this unit: the sparkline/leaderboard panel (group 6). No placeholder is drawn.
+The limits strip (task 7.4, view half) sits between the title and the HOSTS rule: one block
+of three rows (header, 5h, 7d) per account, fed by hub.HubState.limits.
 """
 
 import os
@@ -45,6 +51,7 @@ from grid_fleet import hub
 # ---------------------------------------------------------------------------
 
 PLAIN, BOLD, BUSY, WAITING, GREY, DIM = "plain", "bold", "busy", "waiting", "grey", "dim"
+OK, WARN, CRIT = "ok", "warn", "crit"  # limit bar severity (design.md: green/yellow/red)
 _COLOUR_FREE_TAGS = (PLAIN, BOLD)
 
 Span = Tuple[str, str]
@@ -54,14 +61,17 @@ MIN_WIDTH, MIN_HEIGHT = 60, 16  # design.md: below this, one-line message instea
 
 
 class _Glyphs(object):
-    def __init__(self, tl, tr, bl, br, h, v, lt, rt, sep, ell):
+    def __init__(self, tl, tr, bl, br, h, v, lt, rt, sep, ell, bar_full, bar_empty, bar_part):
         self.tl, self.tr, self.bl, self.br = tl, tr, bl, br
         self.h, self.v, self.lt, self.rt = h, v, lt, rt
         self.sep, self.ell = sep, ell
+        # Limit bar: filled cell, empty cell, and 1/8..7/8 partial cells (none in ASCII).
+        self.bar_full, self.bar_empty, self.bar_part = bar_full, bar_empty, bar_part
 
 
-UNICODE = _Glyphs("┌", "┐", "└", "┘", "─", "│", "├", "┤", "·", "…")
-ASCII = _Glyphs("+", "+", "+", "+", "-", "|", "+", "+", "|", "~")
+UNICODE = _Glyphs("┌", "┐", "└", "┘", "─", "│", "├", "┤", "·", "…",
+                  "█", "░", ("▏", "▎", "▍", "▌", "▋", "▊", "▉"))
+ASCII = _Glyphs("+", "+", "+", "+", "-", "|", "+", "+", "|", "~", "#", ".", ())
 
 # Fixed column widths (characters). Counts are 7 wide so `unknown` fits in a cell.
 W_COUNT, W_TOK = 7, 8
@@ -72,6 +82,15 @@ AGE_GAP = "  "  # a little more air before the age column
 # Lines taken by everything except host rows: top rule, HOSTS rule, column heads,
 # total row, divider, footer, bottom rule.
 FIXED_LINES = 7
+
+# Limits strip geometry. Each account block is 3 rows (header, 5h, 7d).
+LIMIT_BLOCK_LINES = 3
+MIN_HOST_ROWS = 3  # the strip never squeezes the hosts table below this many body rows
+LIMIT_BAR_MAX, LIMIT_BAR_MIN = 20, 8  # bar width range; below the min, tail text is dropped
+W_PCT = 7  # percentage cell; wide enough for `unknown`
+LIMIT_OLD_S = 3600  # a capture older than this renders dim (design.md "Limits freshness")
+LIMIT_LABELS = (("5h", "five_hour"), ("7d", "seven_day"))
+_WEEKDAYS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")  # fixed English, not locale
 
 
 # ---------------------------------------------------------------------------
@@ -274,6 +293,100 @@ def _footer_line(state: hub.HubState, inner: int, g: _Glyphs) -> List[Span]:
     return [(" ", PLAIN), (left, PLAIN), (" " * pad, PLAIN)] + right
 
 
+def _limit_tag(pct: float) -> str:
+    """design.md thresholds: green < 60 %, yellow 60-84 %, red >= 85 %."""
+    if pct >= 85:
+        return CRIT
+    if pct >= 60:
+        return WARN
+    return OK
+
+
+def _bar(pct: Optional[float], width: int, g: _Glyphs) -> str:
+    """A bar exactly `width` cells wide. None (unknown) is an empty track."""
+    if pct is None or width <= 0:
+        return g.bar_empty * max(0, width)
+    if g.bar_part:
+        eighths = int(round(pct / 100.0 * width * 8))
+        full, part = divmod(eighths, 8)
+        text = g.bar_full * full + (g.bar_part[part - 1] if part else "")
+    else:
+        text = g.bar_full * int(round(pct / 100.0 * width))
+    return text.ljust(width, g.bar_empty)[:width]
+
+
+def _clock(resets_at: int, now: int) -> str:
+    """Hub-local reset time: `16:10` within a day, `Mon 09:00` beyond. '' if unrepresentable."""
+    try:
+        t = time.localtime(resets_at)
+    except (OverflowError, ValueError, OSError):
+        return ""
+    hhmm = "%02d:%02d" % (t.tm_hour, t.tm_min)
+    return hhmm if resets_at - now < 86400 else "%s %s" % (_WEEKDAYS[t.tm_wday], hhmm)
+
+
+def _limit_tails(w: hub.LimitWindow, now: int) -> List[str]:
+    """Candidate tail texts for a window, most detailed first; the renderer takes the first
+    that leaves room for a bar. Every known window always keeps `as of <age> ago`."""
+    if w.pct is None:
+        if w.expired:
+            return ["window reset"]  # says why it is unknown; the stored % no longer applies
+        return ["no data"]
+    asof = "as of %s ago" % fmt_age(w.age_s or 0)
+    left = fmt_age(max(0, (w.resets_at or 0) - now))
+    out = []
+    clock = _clock(w.resets_at or 0, now)
+    if clock:
+        out.append("resets %s (in %s)  %s" % (clock, left, asof))
+    out.append("resets in %s  %s" % (left, asof))
+    out.append(asof)
+    return out
+
+
+def _limit_row(label: str, w: hub.LimitWindow, now: int, inner: int, g: _Glyphs) -> List[Span]:
+    prefix = " %s  " % label
+    pct_text = "unknown" if w.pct is None else "%d%%" % int(round(w.pct))
+    # 1 = gap between bar and pct, 2 = gap between pct and tail.
+    room = inner - len(prefix) - 1 - W_PCT - 2
+    tails = _limit_tails(w, now)
+    tail = tails[-1]
+    for cand in tails:  # first candidate that still leaves a usable bar
+        if room - len(cand) >= LIMIT_BAR_MIN:
+            tail = cand
+            break
+    bar_w = max(0, min(LIMIT_BAR_MAX, room - len(tail)))
+    if w.pct is None:
+        tag = GREY
+    elif w.age_s is not None and w.age_s > LIMIT_OLD_S:
+        tag = DIM  # old capture: dim whatever the severity; the age text still says how old
+    else:
+        tag = _limit_tag(w.pct)
+    return [
+        (prefix, BOLD),
+        (_bar(w.pct, bar_w, g), tag), (" ", PLAIN),
+        (pct_text.ljust(W_PCT), tag), ("  ", PLAIN),
+        (tail, GREY if w.pct is None else PLAIN),
+    ]
+
+
+def _limit_lines(blocks, now: int, inner: int, g: _Glyphs, max_lines: int) -> List[List[Span]]:
+    """The limits strip rows (unboxed). Blocks beyond the row budget collapse to one notice."""
+    show = len(blocks)
+    if show * LIMIT_BLOCK_LINES > max_lines:
+        show = max(1, (max_lines - 1) // LIMIT_BLOCK_LINES)
+    rows = []  # type: List[List[Span]]
+    for b in blocks[:show]:
+        head = [(" ", PLAIN), ("LIMITS", BOLD)]
+        if b.account:
+            head.append(("  account %s" % b.account, PLAIN))
+        rows.append(head)
+        for label, attr in LIMIT_LABELS:
+            rows.append(_limit_row(label, getattr(b, attr), now, inner, g))
+    if show < len(blocks):
+        rows.append([(" ", PLAIN), ("%s %d more accounts not shown" % (g.ell, len(blocks) - show), DIM)])
+    return rows
+
+
 def _stamp(now: int) -> str:
     # Hub-local wall time; the format is fixed so output is stable apart from the zone.
     return time.strftime("%Y-%m-%d %H:%M", time.localtime(now))
@@ -298,9 +411,14 @@ def render(state: hub.HubState, width: int, height: int, ascii_mode: bool = Fals
     hw = max(5, min(longest, 16, inner - 1 - 1 - W_REGION - len(AGE_GAP) - W_AGE_MIN))
     age_w = inner - 1 - hw - 1 - W_REGION - len(AGE_GAP)
 
+    # Limits strip first: it takes its rows off the top, hosts get what is left (at least
+    # MIN_HOST_ROWS, enforced by collapsing surplus accounts into a notice).
+    limit_rows = _limit_lines(state.limits, state.now, inner, g,
+                              max(LIMIT_BLOCK_LINES, height - FIXED_LINES - MIN_HOST_ROWS))
+
     # Host blocks, truncated to the rows that fit; the total row and footer always stay.
     blocks = [_host_lines(h, hw, age_w, g) for h in state.hosts]
-    avail = height - FIXED_LINES
+    avail = height - FIXED_LINES - len(limit_rows)
     body = []  # type: List[List[Span]]
     if not blocks:
         body.append([(" ", PLAIN), ("no snapshots in the inbox yet", DIM)])
@@ -312,9 +430,10 @@ def render(state: hub.HubState, width: int, height: int, ascii_mode: bool = Fals
             break
         body.extend(block)
 
-    lines = [_rule(g, g.tl, g.tr, width, "grid-fleet", _stamp(state.now)),
-             _rule(g, g.lt, g.rt, width, "HOSTS"),
-             _boxed(_head_line(hw, age_w), inner, g)]
+    lines = [_rule(g, g.tl, g.tr, width, "grid-fleet", _stamp(state.now))]
+    lines += [_boxed(r, inner, g) for r in limit_rows]
+    lines += [_rule(g, g.lt, g.rt, width, "HOSTS"),
+              _boxed(_head_line(hw, age_w), inner, g)]
     lines += [_boxed(b, inner, g) for b in body]
     lines += [_boxed(_total_line(state, hw, age_w), inner, g),
               _rule(g, g.lt, g.rt, width),
@@ -357,6 +476,9 @@ def _build_attrs(api, color: bool) -> Dict[str, int]:
     # Bright black (8) is the usual "grey" on 16+ colour terminals; otherwise dim.
     attrs[GREY] = pair(3, 8) if getattr(api, "COLORS", 0) >= 16 else api.A_DIM
     attrs[DIM] = api.A_DIM
+    attrs[OK] = pair(4, api.COLOR_GREEN)
+    attrs[WARN] = pair(5, api.COLOR_YELLOW)
+    attrs[CRIT] = pair(6, api.COLOR_RED)
     return attrs
 
 

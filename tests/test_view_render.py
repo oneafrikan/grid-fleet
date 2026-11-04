@@ -296,9 +296,9 @@ class TestSizes(RenderCase):
         self.assertIn("12 of 12 hosts fresh", out)
 
     def test_hosts_that_just_fit_get_no_more_notice(self):
-        for i in range(4):  # 4 hosts x 2 rows = 8 rows = exactly the room at height 16
-            self.put("host%d" % i)
-        out = "\n".join(self.text(width=80, height=16))
+        for i in range(4):  # 4 hosts x 2 rows = 8 rows = exactly the room at height 20
+            self.put("host%d" % i)  # (height 16 minus the 3-row limits strip leaves only 6)
+        out = "\n".join(self.text(width=80, height=20))
         self.assertNotIn("more hosts", out)
         self.assertIn("host3", out)
 
@@ -350,7 +350,7 @@ class TestGlyphsAndColour(RenderCase):
             for text, tag in ln:
                 self.assertIsInstance(text, str)
                 self.assertIn(tag, (view.PLAIN, view.BOLD, view.BUSY, view.WAITING,
-                                    view.GREY, view.DIM))
+                                    view.GREY, view.DIM, view.OK, view.WARN, view.CRIT))
 
     def test_title_has_name_and_timestamp(self):
         self.assertRegex(self.text()[0], r"grid-fleet .* \d{4}-\d{2}-\d{2} \d{2}:\d{2}")
@@ -409,7 +409,7 @@ def fake_curses():
     calls = []
     api = types.SimpleNamespace(
         A_BOLD=1, A_DIM=2, KEY_RESIZE=410, error=FakeError, COLORS=256,
-        COLOR_CYAN=6, COLOR_YELLOW=3, COLOR_BLACK=0,
+        COLOR_CYAN=6, COLOR_YELLOW=3, COLOR_BLACK=0, COLOR_GREEN=2, COLOR_RED=1,
         has_colors=lambda: True,
         start_color=lambda: calls.append(("start_color",)),
         use_default_colors=lambda: None,
@@ -539,6 +539,18 @@ class TestRunLoop(RenderCase):
         screen, api = self.run_loop([Q])
         self.assertTrue(any(c[0] == "init_pair" for c in api.calls))
         self.assertTrue(screen.frame_attrs() - {0, api.A_BOLD})
+
+    def test_limit_bars_get_green_yellow_red_pairs(self):
+        # Synthetic limits: 10 % (green), 70 % (yellow), 90 % (red) across two accounts.
+        lim = lambda a, b: syn.make_limits(NOW - 60, syn.limit_window(a, NOW + 7000),  # noqa: E731
+                                           syn.limit_window(b, NOW + 90000))
+        self.put("alpha", account="team-a", limits=lim(10.0, 70.0))
+        self.put("beta", account="team-b", limits=lim(90.0, 10.0))
+        screen, api = self.run_loop([Q])
+        pairs = {c[1]: c[2] for c in api.calls if c[0] == "init_pair"}
+        self.assertEqual((pairs[4], pairs[5], pairs[6]),
+                         (api.COLOR_GREEN, api.COLOR_YELLOW, api.COLOR_RED))
+        self.assertTrue({4 << 8, 5 << 8, 6 << 8} <= screen.frame_attrs(), screen.frame_attrs())
 
     def test_no_color_when_terminal_has_none(self):
         api = fake_curses()

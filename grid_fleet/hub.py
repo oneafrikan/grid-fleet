@@ -27,9 +27,11 @@ Public API:
     build_state(scan, now, expected_hosts=()) -> HubState   PURE: staleness + aggregation
     read_hub(state_dir, now, expected_hosts=()) -> HubState scan + build in one call
     Total(value, complete)                       a column total; see its docstring
+    build_limits(fresh_entries, now)             PURE: per-account limits blocks (task 7.4)
 """
 
 import json
+import math
 import os
 import stat
 from dataclasses import dataclass
@@ -47,6 +49,17 @@ STALE_FACTOR = 2
 # claiming more (e.g. 10**400, which fits in the file size cap) is treated as "not
 # promised" so the view never does float maths on an astronomically large int.
 MAX_COUNT = 10 ** 15
+
+# Limits numbers are untrusted too. Epoch seconds above this (year ~5138) are "not promised":
+# it keeps time.localtime / strftime in the view well inside what every platform accepts.
+MAX_EPOCH = 10 ** 11
+# A used percentage the reader believes. Real values are 0-100; a little over is clamped to
+# 100 (a maxed-out plan must still show as full), anything beyond MAX_PCT is not promised.
+MAX_PCT = 1000.0
+# Account label shown in the limits strip: printable ASCII only (it is free text from a
+# remote machine and must not put escape sequences on the terminal), bounded length.
+ACCOUNT_LABEL_MAX = 32
+DEFAULT_ACCOUNT_LABEL = "default"
 
 FRESH = "fresh"
 STALE = "stale"
@@ -128,6 +141,35 @@ class HostState:
 
 
 @dataclass(frozen=True)
+class LimitWindow:
+    """One limit window (5h or 7d) of one account, as the view should show it.
+
+    pct          used percentage 0-100, or None = render `unknown` (absent, invalid or expired).
+                 Never 0 for "we do not know".
+    resets_at    epoch s the window resets; None when not promised.
+    age_s        hub now - the capture time of the snapshot it came from (>= 0); None when
+                 no snapshot supplied the window. The view prints it as `as of <age>`.
+    expired      True when the stored window's resets_at has passed: the stored percentage no
+                 longer applies, so pct is None. Lets the view say why it is unknown.
+    """
+
+    pct: Optional[float] = None
+    resets_at: Optional[int] = None
+    age_s: Optional[int] = None
+    expired: bool = False
+
+
+@dataclass(frozen=True)
+class AccountLimits:
+    """The limits block for one account label. `account` is "" only for the placeholder
+    block shown when there is no fresh host at all (so nothing names an account)."""
+
+    account: str
+    five_hour: LimitWindow = LimitWindow()
+    seven_day: LimitWindow = LimitWindow()
+
+
+@dataclass(frozen=True)
 class HubState:
     now: int
     hosts: Tuple[HostState, ...]  # sorted by name; includes stale and never-reported
@@ -139,6 +181,9 @@ class HubState:
     out_7d: Total
     cache_24h: Total
     cache_7d: Total
+    # One block per account label among the fresh hosts, sorted by label. Never empty:
+    # with nothing to show, one unknown block (see build_limits).
+    limits: Tuple[AccountLimits, ...] = ()
 
     @property
     def host_count(self) -> int:
@@ -295,6 +340,114 @@ def _sum(values: Iterable[Optional[int]]) -> Total:
     return Total(sum(known), len(known) == len(vals))
 
 
+# ---------------------------------------------------------------------------
+# Limits (per account, per window)
+# ---------------------------------------------------------------------------
+
+# The two windows, in the order the strip shows them, with the snapshot key for each.
+LIMIT_WINDOWS = ("five_hour", "seven_day")
+
+
+def _epoch(value) -> Optional[int]:
+    """A finite epoch-seconds number in (0, MAX_EPOCH] as an int, else None (bool excluded)."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    if not 0 < value <= MAX_EPOCH:
+        return None
+    return int(value)
+
+
+def _pct(value) -> Optional[float]:
+    """A finite percentage in [0, MAX_PCT], clamped to 100, else None (bool excluded).
+
+    Strings, null, negatives, NaN/inf and absurdly large numbers are all "not promised".
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    if not 0 <= value <= MAX_PCT:
+        return None
+    return float(min(value, 100))
+
+
+def _account_label(snapshot: dict) -> str:
+    """The snapshot's `account`, made terminal-safe; missing or non-text means the default."""
+    raw = snapshot.get("account")
+    if not isinstance(raw, str):
+        return DEFAULT_ACCOUNT_LABEL
+    label = "".join(c if " " <= c <= "~" else "?" for c in raw).strip()[:ACCOUNT_LABEL_MAX]
+    return label or DEFAULT_ACCOUNT_LABEL
+
+
+def _snapshot_limits(snapshot: dict) -> Tuple[Optional[int], dict]:
+    """(captured_at, limits dict) from a snapshot; (None, {}) when there is nothing usable.
+
+    Without a believable captured_at the snapshot cannot take part in "greatest captured_at",
+    so its limits are ignored rather than guessed at.
+    """
+    lim = snapshot.get("limits")
+    if not isinstance(lim, dict):
+        return None, {}
+    captured = _epoch(lim.get("captured_at"))
+    if captured is None:
+        return None, {}
+    return captured, lim
+
+
+def _pick_window(candidates, window: str, now: int) -> LimitWindow:
+    """Choose one window from (captured_at, limits) pairs of one account's fresh hosts.
+
+    Each window is chosen independently: the greatest captured_at among the snapshots that
+    carry a usable value for THIS window wins (a host that has only seen the 5h window must
+    not blank out another host's 7d). Ties keep the first (candidates are in host order).
+    Then the expiry rule: resets_at <= now means the stored percentage is stale -> unknown.
+    """
+    best = None  # (captured_at, pct, resets_at)
+    for captured, lim in candidates:
+        w = lim.get(window)
+        if not isinstance(w, dict):
+            continue
+        pct, resets = _pct(w.get("used_pct")), _epoch(w.get("resets_at"))
+        if pct is None or resets is None:
+            continue  # half a window is no window: never show a bar we cannot place in time
+        if best is None or captured > best[0]:
+            best = (captured, pct, resets)
+    if best is None:
+        return LimitWindow()  # absent everywhere: unknown, not 0
+    captured, pct, resets = best
+    age = max(0, now - captured)  # hub clock; clamped like host age
+    if now >= resets:
+        return LimitWindow(None, resets, age, True)
+    return LimitWindow(pct, resets, age, False)
+
+
+def build_limits(fresh_entries, now: int) -> Tuple[AccountLimits, ...]:
+    """Per-account limits blocks from the FRESH hosts' snapshots (pure).
+
+    Stale hosts are excluded by the caller. Accounts are the labels of the fresh hosts
+    (a fresh host without limits still creates its account's all-unknown block). With no
+    fresh host at all, a single unnamed all-unknown block keeps the strip visible.
+    """
+    by_account = {}  # type: dict
+    for entry in fresh_entries:
+        by_account.setdefault(_account_label(entry.snapshot), []).append(
+            _snapshot_limits(entry.snapshot))
+    if not by_account:
+        return (AccountLimits(""),)
+    blocks = []
+    for account in sorted(by_account):
+        cands = [(c, lim) for c, lim in by_account[account] if c is not None]
+        blocks.append(AccountLimits(
+            account,
+            _pick_window(cands, "five_hour", now),
+            _pick_window(cands, "seven_day", now),
+        ))
+    return tuple(blocks)
+
+
 def build_state(scan: InboxScan, now: int, expected_hosts: Iterable[str] = ()) -> HubState:
     """Pure: scan + hub clock + expected hosts -> everything the view needs.
 
@@ -302,6 +455,8 @@ def build_state(scan: InboxScan, now: int, expected_hosts: Iterable[str] = ()) -
     hosts only; `expected_hosts` with no inbox entry become NEVER rows.
     """
     hosts = [_host_state(e, now) for e in scan.entries]
+    # Entries whose host is FRESH, in the scan's (file name) order: the limits source.
+    fresh_entries = [e for e, h in zip(scan.entries, hosts) if h.status == FRESH]
     seen = set(h.name for h in hosts)
     for name in expected_hosts:
         if name not in seen:
@@ -320,6 +475,7 @@ def build_state(scan: InboxScan, now: int, expected_hosts: Iterable[str] = ()) -
         out_7d=_sum(h.out_7d for h in fresh),
         cache_24h=_sum(h.cache_24h for h in fresh),
         cache_7d=_sum(h.cache_7d for h in fresh),
+        limits=build_limits(fresh_entries, now),
     )
 
 
