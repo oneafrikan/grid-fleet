@@ -127,3 +127,78 @@ Findings:
    holds 2.1.305). Expected behaviour. Adding the version to the tested list is task 9.4 and needs
    the human.
 3. No timers exist yet (Group 8), so all pushes were manual.
+
+## U7 / Group 7 spikes
+
+Run on the reference machine (macOS, Apple Silicon) on 2026-11-04, at commit `77d8e53`. Prototype
+tap and all scripts were throwaway and are not in the repo. The statusLine was a synthetic Python
+script that exits 0 with no output unless two gating env vars are set, otherwise prints one line
+and exits 3 (non-zero on purpose, to exercise exit-code passthrough). No real statusLine or
+settings were read.
+
+### 7.1 Tap overhead and chaining (50 timed invocations per cell, 5 warm-up, direct and tapped runs interleaved)
+
+Stock `/usr/bin/python3` 3.9.6 (target), two full runs:
+
+| Gating vars | Run | Direct p50 / p95 (ms) | Tapped p50 / p95 (ms) | Added p50 (ms) | Added p95 (ms, p95 of tapped minus p95 of direct) | stdout and exit code byte-identical |
+|---|---|---|---|---|---|---|
+| unset (script exits early, rc 0) | 1 | 19.1 / 24.5 | 45.4 / 50.8 | 25.3 | 26.3 | yes |
+| unset | 2 | 18.1 / 19.1 | 43.0 / 45.5 | 24.9 | 26.3 | yes |
+| set (prints line, rc 3) | 1 | 19.5 / 21.8 | 45.7 / 51.3 | 26.2 | 29.4 | yes |
+| set | 2 | 19.3 / 22.8 | 46.0 / 51.9 | 26.0 | 29.1 | yes |
+
+Homebrew `python3` on PATH (3.14.6), one run, tap and original both under it:
+
+| Gating vars | Direct p50 / p95 (ms) | Tapped p50 / p95 (ms) | Added p50 (ms) | Added p95 (ms) | Identical |
+|---|---|---|---|---|---|
+| unset | 16.7 / 17.5 | 42.2 / 45.3 | 25.4 | 27.8 | yes |
+| set | 17.1 / 22.1 | 43.2 / 51.2 | 25.7 | 29.1 | yes |
+
+Notes:
+
+- Worst added p95 across all cells: 29.4 ms, under the 50 ms bound. Margin is about 20 ms.
+- The added cost is one extra interpreter start plus one subprocess spawn. It does not scale with
+  the original's own cost.
+- Here the original was itself a Python script. A shell original would not change the tap's
+  own added cost (the tap is the same code path), but absolute tapped totals would be lower.
+- Full environment passed through unchanged (the gating vars reached the original in the set case).
+- 3.9 and 3.14 differ by under 3 ms added p95. Timings varied run to run by up to about 6 ms at p95.
+
+Verdict:
+
+- PASS. p95 added latency under 50 ms in both env cases and output identical in both. The 50 ms
+  bound in the spec is CONFIRMED. Shell-wrapper fallback not triggered.
+
+### 7.2 Missing limits, synthetic payloads (prototype tap, `/usr/bin/python3` 3.9.6)
+
+| Case | Prior file | Resulting file state | Maps to spec |
+|---|---|---|---|
+| No `rate_limits` | none | no file created (state dir stays empty) | yes (Fresh session) |
+| No `rate_limits` | both windows | byte-identical to before (hash match) | yes (file unchanged) |
+| `rate_limits` is `{}` | none | no file created | spec silent, same outcome as above |
+| Only `five_hour` | none | `captured_at` + `five_hour`; no `seven_day` | yes |
+| Only `seven_day` | none | `captured_at` + `seven_day`; no `five_hour` | yes |
+| Both | none | `captured_at` + both windows; mode 0600 | yes (Both windows present) |
+| Only `five_hour` | `seven_day` resets_at in future | `seven_day` kept with previous values | yes (partial merge) |
+| Only `five_hour` | `seven_day` resets_at in past | `seven_day` omitted | yes (partial merge) |
+| Only `seven_day` | `five_hour` resets_at in future | `five_hour` kept with previous values | yes (partial merge) |
+
+Other spec scenarios exercised on the prototype:
+
+- Extra payload fields (cwd, session id, transcript path, model, an unknown field inside a window)
+  were not present in the written file: yes.
+- File mode 0600: yes in every written case.
+- No original command: stdout empty, exit 0, slice still written.
+- Limits write fails (state path unusable): original stdout and exit code (3) still returned.
+- 30 simultaneous taps: final file valid JSON, no leftover temp files.
+
+Observation (not a contradiction, flag for 7.3):
+
+- On a partial merge the single file-level `captured_at` is set to now, so a carried-forward window
+  looks as fresh as the one just captured. The spec has one `captured_at`, so per-window age
+  cannot be recovered. The view's `as of <age>` for that window would then understate its age.
+
+Result:
+
+- Synthetic cases: all map to the spec. No spec delta needed from these.
+- Real fresh-session observation: NOT DONE, pending HUMAN.
