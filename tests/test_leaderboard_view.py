@@ -179,6 +179,24 @@ class TestLeaderboardHostileInput(PanelCase):
         self.put("alpha", agents=make_agents(agent_row("x" * 5000, 5)))
         self.assertEqual(len(self.hubstate().agents[0].type), hub.AGENT_TYPE_MAX)
 
+    def test_long_names_sharing_a_prefix_stay_distinct_rows(self):
+        # QA finding 1: labels used to be cut to 24 chars BEFORE summing, so these 11 types
+        # (same 24-char prefix) silently merged into one row. They aggregate on the full label.
+        names = ["agent-with-a-rather-long-name-%d" % i for i in range(1, 12)]
+        self.assertEqual(len(set(n[:24] for n in names)), 1)  # the premise: one shared prefix
+        self.put("alpha", agents=make_agents(*[agent_row(n, 20 - i) for i, n in enumerate(names)]))
+        self.put("beta", agents=make_agents(agent_row(names[0], 5)))  # sums per FULL name
+        board = self.board()
+        # The top-8 cut applies after aggregation: 8 distinct rows, none merged.
+        self.assertEqual(len(board), 8)
+        self.assertEqual(board[names[0]], 25)
+        self.assertEqual(self.board_order(), names[:8])
+
+    def test_long_name_ties_break_deterministically_on_the_full_label(self):
+        a, b = "x" * 30 + "-b", "x" * 30 + "-a"  # identical first 30 chars
+        self.put("alpha", agents=make_agents(agent_row(a, 3), agent_row(b, 3)))
+        self.assertEqual(self.board_order(), [b, a])
+
     def test_agent_type_that_cleans_to_nothing_is_unknown(self):
         self.put("alpha", agents=make_agents(agent_row("   ", 5)))
         self.assertEqual(self.board(), {"unknown": 5})

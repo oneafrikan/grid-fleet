@@ -82,7 +82,10 @@ LEADERBOARD_SIZE = 8  # design.md: top 8 agent types by invocations
 SPARK_DAYS = 7  # by_day carries 7 UTC dates
 MAX_AGENT_ROWS_PER_HOST = 200  # rows of agents.last_7d read per host (real fleets: a dozen)
 MAX_BY_DAY_PER_HOST = 14  # rows of tokens.by_day read per host (real: exactly 7)
-AGENT_TYPE_MAX = 24  # agent type labels are cut to this many characters
+# Hard cap on a cleaned agent type label. It only bounds memory (the collector already
+# caps agentType at 64); rows are aggregated on the FULL label so two distinct types that
+# share a long prefix stay separate. The view clips to its own column width when drawing.
+AGENT_TYPE_MAX = 64
 
 FRESH = "fresh"
 STALE = "stale"
@@ -196,7 +199,7 @@ class AccountLimits:
 class AgentRow:
     """One leaderboard row: an agent type summed across the fresh hosts.
 
-    type         terminal-safe label (printable ASCII, at most AGENT_TYPE_MAX characters).
+    type         terminal-safe label (printable ASCII, at most AGENT_TYPE_MAX characters; the view clips it).
     invocations  sum of agents.last_7d[].invocations over fresh hosts (> 0).
     output       sum of the believable `output` figures, or None when no host promised one.
     """
