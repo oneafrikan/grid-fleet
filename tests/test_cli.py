@@ -47,13 +47,6 @@ class TestCli(CliCase):
         self.assertEqual(rc, 0)
         self.assertIn(__version__, out)
 
-    def test_each_subcommand_is_a_stub_exiting_2(self):
-        # Implemented subcommands are removed from this list as their units land.
-        for name in ("install",):
-            rc, _, err = self.run_cli([name])
-            self.assertEqual(rc, 2, name)
-            self.assertIn("not implemented", err, name)
-
     def test_tap_stub_with_command(self):
         rc, _, err = self.run_cli(["tap", "--", "echo", "--flag", "x"])
         self.assertEqual(rc, 2)
@@ -140,7 +133,8 @@ class TestEntryScript(CliCase):
         r = subprocess.run([sys.executable, BIN, "--version"], capture_output=True, text=True)
         self.assertEqual(r.returncode, 0)
         self.assertIn(__version__, r.stdout)
-        r = subprocess.run([sys.executable, BIN, "install"], capture_output=True, text=True)
+        # `tap` is the one remaining stub (install is implemented and has its own tests).
+        r = subprocess.run([sys.executable, BIN, "tap"], capture_output=True, text=True)
         self.assertEqual(r.returncode, 2)
         self.assertIn("not implemented", r.stderr)
 
