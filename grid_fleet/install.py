@@ -445,12 +445,16 @@ def _uninstall(kind, paths, uid, runner, loaded):
 # --- statusLine (task 8.3) -----------------------------------------------------------------
 #
 # Flow for `install --statusline`:   read settings -> build edit -> print exact
-# before/after -> TTY + "y" -> backup -> save original to config -> atomic write.
+# before/after -> TTY + "y" -> backup -> atomic settings write -> save original to config.
 # Everything up to the confirmation is read-only. Order of the writes matters:
 #   1. backup of settings.json (a byte copy)
-#   2. config `statusline_original` (so the original can never be lost)
-#   3. settings.json itself
-# A failure after step 2 leaves a harmless stale config value; a re-run overwrites it.
+#   2. settings.json itself
+#   3. config `statusline_original` (a single slot, informational)
+# The wrapper in settings.json embeds the original, and that embedded copy is what
+# uninstall trusts. The config slot is one value per grid-fleet config, so with several
+# Claude dirs sharing one config the last install wins it; it must never decide what a
+# different dir gets back. Writing it last also means a refused/failed settings write
+# leaves the config untouched.
 
 SETTINGS_FILE = "settings.json"
 BACKUP_INFIX = ".grid-fleet-backup-"
@@ -502,6 +506,13 @@ def is_tap_command(command: str) -> bool:
     return _tap_words(command) is not None
 
 
+def _tap_script(command: str) -> Optional[str]:
+    """The grid-fleet script path inside a tap wrapper (word 2), or None if not a wrapper."""
+    if _tap_words(command) is None:
+        return None
+    return shlex.split(command)[1]
+
+
 def _original_from_tap(command: str) -> Optional[str]:
     """Recover the original from a wrapper we wrote (fallback when config lost it).
     Raises InstallError for a tap command whose tail is not a form we produce."""
@@ -531,6 +542,49 @@ def _pick_style(data, text: str):
         if _dump(data, style) == text:
             return style, True
     return (2, False, "\n"), False
+
+
+# What a rewrite in the fallback layout can change. Shown to the user before the "y", so it
+# must list what really happens, not only the good news.
+_REWRITE_NOTE = ("note: settings.json is not in a layout grid-fleet can reproduce, so it will be "
+                 "rewritten as 2-space JSON. Values and key order are kept, but duplicate keys "
+                 "are dropped (the last one wins), CRLF line endings become LF, and number "
+                 "spellings may be normalised (e.g. 1.0e2 becomes 100.0)")
+
+
+def _has_nonfinite(obj) -> bool:
+    """True if any number in the parsed JSON is inf/nan. json.loads accepts `1e999`,
+    `NaN` and `Infinity`; json.dumps would write them back as bare `Infinity`/`NaN`,
+    which is not valid JSON, so a lossy rewrite must refuse instead."""
+    stack = [obj]
+    while stack:
+        cur = stack.pop()
+        if isinstance(cur, float) and (cur != cur or cur in (float("inf"), float("-inf"))):
+            return True
+        if isinstance(cur, dict):
+            stack.extend(cur.values())
+        elif isinstance(cur, list):
+            stack.extend(cur)
+    return False
+
+
+def _render(data, style, exact, path: str):
+    """(new text, layout note) for the edited settings, or InstallError.
+
+    Refuses, before anything is written, when the rewrite could not be faithful: a number
+    that would come back as Infinity/NaN (only possible when the layout is not reproduced
+    byte-for-byte), or text that cannot be encoded as UTF-8 (a lone-surrogate escape such as
+    "\\ud800" in a non-reproducible layout)."""
+    if not exact and _has_nonfinite(data):
+        raise InstallError("%s contains a number (e.g. 1e999) that cannot be rewritten as valid "
+                           "JSON; left untouched, fix or remove it first" % path)
+    text = _dump(data, style)
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        raise InstallError("%s contains text that cannot be written as UTF-8 (a lone surrogate "
+                           "escape?); left untouched" % path)
+    return text, ("" if exact else _REWRITE_NOTE)
 
 
 def _read_json_object(path: str, what: str):
@@ -604,25 +658,41 @@ def plan_statusline_install(path: str, python: str, script: str) -> StatuslineEd
     sl, current = _statusline_command(data)
     if current is not None and is_tap_command(current):
         # Never double-wrap. (If the clone moved, the old wrapper keeps pointing at the old
-        # path: `--uninstall` then `--statusline` re-points it.)
+        # path: `--uninstall` then `--statusline` re-points it.) Say so loudly: a wrapper
+        # whose script is gone makes the statusLine print nothing, silently.
+        note = ""
+        old_script = _tap_script(current)
+        if old_script is not None and not os.path.exists(old_script):
+            note = ("WARNING: the existing wrapper points at %s, which does not exist (moved or "
+                    "deleted clone?), so the statusLine is currently blank. Nothing was changed; "
+                    "to re-point it run `grid-fleet install --statusline --uninstall`, then "
+                    "`grid-fleet install --statusline`" % old_script)
         return StatuslineEdit("noop", "statusLine is already wrapped by grid-fleet; nothing "
-                              "to change", path, raw, None, current, current, "", None)
+                              "to change", path, raw, None, current, current, note, None)
     wrapped = tap_command(python, script, current)
     new_sl = {"type": "command", "command": wrapped} if sl is None else dict(sl, command=wrapped)
     new_data = dict(data)  # a copy keeps key order; an existing statusLine stays in place
     new_data["statusLine"] = new_sl
-    note = "" if exact else ("note: settings.json is not in a layout grid-fleet can reproduce; "
-                             "it will be rewritten as 2-space JSON (same values and key order)")
-    return StatuslineEdit("change", "", path, raw, _dump(new_data, style), current, wrapped,
-                          note, current)
+    new_text, note = _render(new_data, style, exact, path)
+    return StatuslineEdit("change", "", path, raw, new_text, current, wrapped, note, current)
+
+
+def _refuse(path: str, message: str) -> StatuslineEdit:
+    return StatuslineEdit("refuse", "statusLine NOT restored: %s" % message, path, b"",
+                          None, None, None, "", None)
 
 
 def plan_statusline_restore(path: str, saved: Optional[str]) -> StatuslineEdit:
     """Read-only. The edit that puts the original statusLine back.
 
-    `saved` is config statusline_original (None = unknown); when None the original is
-    recovered from the wrapper itself, and a wrapper with no original means we created
-    the statusLine, so it is removed again.
+    The original embedded in the wrapper in THIS settings file is the only source that is
+    certain to belong to this Claude dir, so it decides. `saved` (config
+    statusline_original) is one slot shared by every Claude dir using the config; it is
+    never used to replace what the wrapper says. It only (a) tells an empty-string
+    original from "no statusLine" (both are written as a bare `tap --`), and (b) is shown
+    in a note or in the refusal when it disagrees. A wrapper whose tail is not a form
+    grid-fleet writes (hand-edited, or a lookalike) is refused untouched, whatever is
+    saved: a stale slot must never silently replace it.
     """
     try:
         raw, data = _read_json_object(path, "settings file")
@@ -630,8 +700,7 @@ def plan_statusline_restore(path: str, saved: Optional[str]) -> StatuslineEdit:
         if not os.path.lexists(path):
             return StatuslineEdit("noop", "no settings file, nothing to restore: %s" % path,
                                   path, b"", None, None, None, "", None)
-        return StatuslineEdit("refuse", "statusLine NOT restored: %s" % exc,
-                              path, b"", None, None, None, "", None)
+        return _refuse(path, str(exc))
     style, exact = _pick_style(data, raw.decode("utf-8"))
     try:
         sl, current = _statusline_command(data)
@@ -641,7 +710,23 @@ def plan_statusline_restore(path: str, saved: Optional[str]) -> StatuslineEdit:
         return StatuslineEdit("noop", "statusLine is not wrapped by grid-fleet; nothing to "
                               "restore", path, raw, None, current, current, "", None)
     try:
-        original = saved if saved is not None else _original_from_tap(current)
+        try:
+            original = _original_from_tap(current)
+        except InstallError as exc:
+            detail = "%s. Nothing was changed." % exc
+            if saved is not None:
+                detail += (" The config's %s is %s but is not used for a wrapper that does not "
+                           "match what grid-fleet writes." % (CONFIG_KEY, _show(saved)))
+            raise InstallError(detail + " To proceed, set statusLine.command in %s by hand, "
+                               "then re-run." % path)
+        notes = []
+        if original is None and saved == "":
+            original = ""  # a bare `tap --` plus a saved "": the original command was empty
+        elif saved is not None and saved != original:
+            notes.append("note: the config's %s (%s) differs from the original embedded in this "
+                         "wrapper (%s); using the wrapper's. (The config keeps one slot shared by "
+                         "all Claude dirs, so another dir's install can overwrite it.)"
+                         % (CONFIG_KEY, _show(saved), _show(original)))
         new_data = dict(data)
         if original is None:
             # We created the whole statusLine; remove it, but only if nobody added to it.
@@ -651,21 +736,27 @@ def plan_statusline_restore(path: str, saved: Optional[str]) -> StatuslineEdit:
             del new_data["statusLine"]
         else:
             new_data["statusLine"] = dict(sl, command=original)
+        new_text, layout_note = _render(new_data, style, exact, path)
+        if layout_note:
+            notes.append(layout_note)
     except InstallError as exc:
         return StatuslineEdit("refuse", "statusLine NOT restored: %s" % exc, path, raw,
                               None, None, None, "", None)
-    note = "" if exact else ("note: settings.json will be rewritten as 2-space JSON "
-                             "(same values and key order)")
-    return StatuslineEdit("change", "", path, raw, _dump(new_data, style), current,
-                          original, note, original)
+    return StatuslineEdit("change", "", path, raw, new_text, current,
+                          original, "\n  ".join(notes), original)
 
 
 # -- applying ------------------------------------------------------------------------------
 
 
-def _set_config_original(config_path: str, value: Optional[str], create: bool) -> None:
+def _set_config_original(config_path: str, value: Optional[str], create: bool,
+                         only_if: Optional[str] = None) -> None:
     """Set (or clear, value=None) `statusline_original` in the config file, keeping every
-    other key. Raises InstallError if the file is unusable, OSError on write failure."""
+    other key. Raises InstallError if the file is unusable, OSError on write failure.
+
+    only_if: when given, write only if the slot currently holds exactly this value. Restore
+    uses it so that clearing the slot never discards a value another Claude dir's install
+    saved there (the slot is shared; see the flow comment above)."""
     if os.path.lexists(config_path):
         raw, data = _read_json_object(config_path, "config file")
         style, _exact = _pick_style(data, raw.decode("utf-8"))
@@ -674,12 +765,17 @@ def _set_config_original(config_path: str, value: Optional[str], create: bool) -
         data, style, mode = {"schema": cfg.SCHEMA}, (2, False, "\n"), 0o600
     else:
         return
+    if only_if is not None and data.get(CONFIG_KEY) != only_if:
+        return
     data[CONFIG_KEY] = value
     _write_json_file(config_path, data, style, mode)
 
 
 def _apply_statusline_edit(edit: StatuslineEdit, config_path: str, restoring: bool) -> str:
-    """Perform a confirmed edit; returns the backup path. Raises InstallError / OSError."""
+    """Perform a confirmed edit; returns the backup path. Raises InstallError / OSError.
+
+    ValueError (UnicodeEncodeError on a lone surrogate) is turned into InstallError: the
+    plan already refuses such text, this is the belt for anything that slips past it."""
     # The user (or Claude Code) may have saved settings.json while we waited for the "y".
     try:
         with open(edit.path, "rb") as fh:
@@ -690,17 +786,28 @@ def _apply_statusline_edit(edit: StatuslineEdit, config_path: str, restoring: bo
         raise InstallError("%s changed while waiting for confirmation; nothing was changed, "
                            "re-run" % edit.path)
     mode = _mode_of(edit.path)
+    try:
+        edit.new_text.encode("utf-8")  # fail before the backup, not after
+    except ValueError as exc:
+        raise InstallError("%s cannot be written, left untouched: %s" % (edit.path, exc))
     backup = _backup(edit.path, edit.raw)
-    if not restoring:
-        _set_config_original(config_path, edit.original, create=True)
-    _write_atomic(os.path.realpath(edit.path), edit.new_text, mode)
-    if restoring:
-        # Settings are already right; clearing the saved value is housekeeping.
-        try:
-            _set_config_original(config_path, None, create=False)
-        except (InstallError, OSError) as exc:
-            sys.stderr.write("grid-fleet install: statusLine restored, but could not clear "
-                             "%s in the config: %s\n" % (CONFIG_KEY, exc))
+    try:
+        _write_atomic(os.path.realpath(edit.path), edit.new_text, mode)
+    except ValueError as exc:
+        raise InstallError("%s cannot be written, left untouched: %s" % (edit.path, exc))
+    # Config second: settings are already right, and the wrapper embeds the original, so a
+    # failure here costs only the informational slot.
+    try:
+        if restoring:
+            # original None = we had created the statusLine, so this dir owns no saved
+            # value and the slot (if any) belongs to someone else: leave it alone.
+            if edit.original is not None:
+                _set_config_original(config_path, None, create=False, only_if=edit.original)
+        else:
+            _set_config_original(config_path, edit.original, create=True)
+    except (InstallError, OSError, ValueError) as exc:
+        sys.stderr.write("grid-fleet install: statusLine %s, but could not update %s in the "
+                         "config: %s\n" % ("restored" if restoring else "updated", CONFIG_KEY, exc))
     return backup
 
 
@@ -716,7 +823,7 @@ def _print_edit(edit: StatuslineEdit, config_path: str, restoring: bool) -> None
     if not restoring:
         out.write("  original saved to %s as %s\n" % (config_path, CONFIG_KEY))
     if edit.note:
-        out.write("  %s\n" % edit.note)
+        out.write("  %s\n" % edit.note)  # may hold several lines, already indented
 
 
 def _statusline_main(config, args, explicit_interval, env, runner, python, script, uid,
@@ -747,6 +854,8 @@ def _statusline_install(config, env, python, script, is_tty, prompt) -> int:
         return EXIT_REFUSED
     if edit.action == "noop":
         sys.stdout.write("%s\n" % edit.message)
+        if edit.note:  # e.g. the wrapper points at a script that no longer exists
+            sys.stderr.write("grid-fleet install: %s\n" % edit.note)
         return EXIT_OK
     _print_edit(edit, config.config_path, restoring=False)
     if not is_tty():
@@ -758,7 +867,7 @@ def _statusline_install(config, env, python, script, is_tty, prompt) -> int:
         return EXIT_REFUSED
     try:
         backup = _apply_statusline_edit(edit, config.config_path, restoring=False)
-    except (InstallError, OSError) as exc:
+    except (InstallError, OSError, ValueError) as exc:
         sys.stderr.write("grid-fleet install: %s\n" % exc)
         return EXIT_REFUSED
     sys.stdout.write("statusLine now runs the tap\nbackup: %s\nundo: grid-fleet install "
@@ -883,8 +992,10 @@ def install_main(config, args, *, runner: Optional[Runner] = None,
 
 
 def _saved_original(config) -> Optional[str]:
-    """statusline_original as saved in the config FILE (the source of truth), falling back
-    to the loaded Config when the file is gone. None means "unknown / none"."""
+    """statusline_original as saved in the config FILE, falling back to the loaded Config
+    when the file is gone. None means "unknown / none". It is one slot shared by every
+    Claude dir, so plan_statusline_restore only cross-checks against it; the original
+    embedded in the wrapper decides."""
     try:
         _raw, data = _read_json_object(config.config_path, "config file")
     except InstallError:
@@ -934,7 +1045,7 @@ def _run_uninstall(kind, paths, uid, runner, is_tty, prompt, sl, config_path, ti
         try:
             msgs.append("statusLine restored; backup: %s"
                         % _apply_statusline_edit(sl, config_path, restoring=True))
-        except (InstallError, OSError) as exc:
+        except (InstallError, OSError, ValueError) as exc:
             msgs.append("statusLine NOT restored: %s" % exc)
             ok = False
     for m in msgs:
