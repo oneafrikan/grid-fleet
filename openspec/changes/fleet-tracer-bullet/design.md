@@ -37,6 +37,7 @@ grid_fleet/cli.py           argparse dispatch: collect | push | view | install (
 grid_fleet/config.py        load/validate config JSON; paths (XDG, env overrides)
 grid_fleet/snapshot.py      snapshot build + schema constants
 grid_fleet/sources_claude.py  agents --json, transcript scan, offset cache, version warning
+grid_fleet/paths.py         shared env/XDG/state-dir helpers and the clock (no heavy imports)
 grid_fleet/limits.py        tap (statusLine wrapper) + limits.json read
 grid_fleet/push.py          ssh/local delivery
 grid_fleet/hub.py           inbox read, staleness
@@ -46,6 +47,7 @@ tests/                      unittest; tests/helpers builds a synthetic ~/.claude
 ```
 
 - Decided: `sources_claude.py` is the only module that knows Claude's layout. No plugin API; this is just where a second agent would go.
+- Clarified at 7.3: `grid_fleet/paths.py` holds the env/XDG/state-dir helpers and the clock; `config.py` re-exports them. The `tap` fast path in `bin/grid-fleet` imports only `paths.py` and `limits.py`, not `cli` or `config`, to keep the added latency low (spike 7.1b).
 - Decided: tests use `unittest` (stdlib). Env overrides for tests: `GRID_FLEET_CONFIG`, `GRID_FLEET_STATE_DIR`, `GRID_FLEET_CLAUDE_DIR`, `GRID_FLEET_CLAUDE_BIN`, `GRID_FLEET_NOW` (epoch). No test reads the real `~/.claude` or runs real ssh.
 
 ## Snapshot (schema 1)
@@ -155,7 +157,7 @@ inbox/.<host>.json.tmp         in-flight upload; ignored by readers
 - Merge rule: a window absent from the new payload keeps its previous stored value only while that value's `resets_at` is in the future; otherwise it is dropped.
 - If the original command is absent, the tap prints nothing and exits 0.
 - Decided: Python tap, slice-only. Rejected: a shell wrapper that stores the whole payload (faster, but the stored file would then contain cwd, session id and transcript path). Fallback if spike 7.1 fails the overhead bound: shell wrapper writing the full payload to a 0600 file that `collect` slices; trade privacy-on-disk for speed. That is a HUMAN call recorded then.
-- `install` rewrites `statusLine.command` to `<python> <bin/grid-fleet> tap -- <original command>` only after printing the exact before/after and getting a yes (see install-timers spec). The original command string is saved in the config as `statusline_original` so uninstall restores it byte-for-byte. Clarified at 8.3: the tap runs its argv without a shell while `statusLine.command` is a shell string, so the written form is `<python> <bin/grid-fleet> tap -- /bin/sh -c '<original command>'` (the original as one shell-quoted argument); a literal pasted `<original command>` would break on `&&`, pipes, `$VAR` and quotes. With no original statusLine the command is `<python> <bin/grid-fleet> tap --` and uninstall removes the `statusLine` object it created. `--uninstall` restores the statusLine as well as the timers; `--statusline --uninstall` restores only the statusLine.
+- `install` rewrites `statusLine.command` to `<python> <bin/grid-fleet> tap -- <original command>` only after printing the exact before/after and getting a yes (see install-timers spec). The original command string is saved in the config as `statusline_original` so uninstall restores it byte-for-byte. Clarified at 8.3: the tap runs its argv without a shell while `statusLine.command` is a shell string, so the written form is `<python> <bin/grid-fleet> tap -- /bin/sh -c '<original command>'` (the original as one shell-quoted argument); a literal pasted `<original command>` would break on `&&`, pipes, `$VAR` and quotes. With no original statusLine the command is `<python> <bin/grid-fleet> tap --` and uninstall removes the `statusLine` object it created. `--uninstall` restores the statusLine as well as the timers; `--statusline --uninstall` restores only the statusLine. Clarified at 8.3: on `--statusline --uninstall` the original embedded in the wrapper in that `settings.json` decides; the config `statusline_original` slot is informational only (one slot per config, shared by every Claude dir using it), is cross-checked against the wrapper, and a disagreement is shown in a note (or in the refusal) printed with the diff.
 - Decided: the existing statusLine may be a script gated by env vars (the pattern agent-hook tools use): it exits early unless certain variables are set. The tap passes the full environment through unchanged and chains stdin, stdout and exit code, so gating keeps working; spike 7.1 verifies with and without the gating variables set.
 
 ## Config (`config.json`, schema 1)

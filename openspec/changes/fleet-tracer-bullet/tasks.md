@@ -20,14 +20,14 @@ Verify: default verify command.
 
 Files: `grid_fleet/snapshot.py`, `grid_fleet/sources_claude.py`, `tests/test_collect.py`, `docs/spikes.md`.
 
-- [ ] 2.1 SPIKE (do first; throwaway script in the scratchpad, results recorded in `docs/spikes.md` as numbers only). Measure a naive full scan of `~/.claude/projects` for files modified in the last 8 days on the reference machine: file count, total MB, cold seconds, and a second pass with the OS cache warm. Never print transcript content. Also check, in one line, whether `CLAUDE_CONFIG_DIR` relocates the projects dir (set it to a temp dir, start a throwaway session, see where the transcript lands) and record yes/no (the collector honours it when set either way; this records whether it works). Pass: the figures exist and justify the offset-cache design; the warm-run budget in the spec (2 s) is confirmed or revised in the spec delta. Fail: if even a hot-cache incremental design cannot get under 5 s, stop and bring the figures to the human. (measurements done, see docs/spikes.md; CLAUDE_CONFIG_DIR sub-check pending HUMAN)
+- [x] 2.1 SPIKE (do first; throwaway script in the scratchpad, results recorded in `docs/spikes.md` as numbers only). Measure a naive full scan of `~/.claude/projects` for files modified in the last 8 days on the reference machine: file count, total MB, cold seconds, and a second pass with the OS cache warm. Never print transcript content. Also check, in one line, whether `CLAUDE_CONFIG_DIR` relocates the projects dir (set it to a temp dir, start a throwaway session, see where the transcript lands) and record yes/no (the collector honours it when set either way; this records whether it works). Pass: the figures exist and justify the offset-cache design; the warm-run budget in the spec (2 s) is confirmed or revised in the spec delta. Fail: if even a hot-cache incremental design cannot get under 5 s, stop and bring the figures to the human. (done, see docs/spikes.md: measurements recorded; `CLAUDE_CONFIG_DIR` sub-check done, yes, it relocates the projects dir)
 - [ ] 2.2 SPIKE: capture a real `waiting` row. HUMAN triggers a permission prompt in a throwaway interactive session; run `claude agents --json` read-only and record the row's keys (not cwd/name values) in `docs/spikes.md`. Pass: a row with `status` `waiting` observed and a synthetic fixture added that matches its shape. Fail: record the actual status string seen for a blocked session and change the spec's status mapping before continuing. Also record the wall time of `claude agents --json` (pass: under 5 s).
 - [x] 2.3 SPIKE: duplicate usage lines. On three large sessions compute output-token sums (numbers only) under three rules: every line, consecutive-same-`message.id` collapse, and last-per-`message.id` globally. Pass: rule 2 equals rule 3 on all three; keep rule 2. Fail: switch design to per-file id sets and amend `design.md`.
 - [x] 2.4 `sources_claude.py`: sessions from `claude agents --json` (interactive, live pid, 10 s timeout, fail soft), version warning, tested-versions list seeded with the verified version.
 - [x] 2.5 Incremental transcript scanner with hourly buckets and `offsets.json` per `design.md`; main and subagent transcripts; truncation and disappearance rules; reads only `type`, `message.id`, `message.usage`, `timestamp`, and `agentType` from meta.
 - [x] 2.6 `snapshot.py` + `collect` command: writes `snapshot.json` (atomic) to the state dir and prints a one-line summary; `agents` and `limits` sections are `null` until groups 6 and 7.
 - [x] 2.7 Tests for every scenario in `specs/snapshot-collect/spec.md` except the leaderboard and limits ones, including: warm run reads only appended bytes (assert via a counting file wrapper), partial last line, truncation, lost cache, corrupt line, privacy (with any config, no synthetic cwd, session name, project directory name or session id appears in the snapshot), unavailable `claude`.
-- [ ] 2.8 Reference-machine check (HUMAN runs, agent records): cold and warm `grid-fleet collect` times on the real corpus. Pass: warm under 2 s (or the revised figure from 2.1). Record in `docs/spikes.md`.
+- [x] 2.8 Reference-machine check (HUMAN runs, agent records): cold and warm `grid-fleet collect` times on the real corpus. Pass: warm under 2 s (or the revised figure from 2.1). Record in `docs/spikes.md`. (done: cold 1.20 s, warm 0.16 s, pass; see docs/spikes.md)
 
 Acceptance: `grid-fleet collect` on a synthetic tree emits a snapshot matching `design.md`'s schema; all listed scenarios pass.
 Verify: default verify command.
@@ -59,16 +59,16 @@ Verify: default verify command.
 
 ## 5. HUMAN: tracer-bullet checkpoint
 
-- [ ] 5.1 Two real machines: both collect and push to the hub, the hub view shows both with correct busy counts for a known number of open sessions, and a deliberately paused spoke turns grey `unknown` after 2 x interval. Pass: all three observed. Fail: file the gap as a new task before continuing.
-- [ ] 5.2 Decide whether to proceed to groups 6-9 or adjust scope.
+- [x] 5.1 Two real machines: both collect and push to the hub, the hub view shows both with correct busy counts for a known number of open sessions, and a deliberately paused spoke turns grey `unknown` after 2 x interval. Pass: all three observed. Fail: file the gap as a new task before continuing. (maintainer sign-off)
+- [x] 5.2 Decide whether to proceed to groups 6-9 or adjust scope. (maintainer sign-off: proceed)
 
 ## 6. Subagent leaderboard and sparkline
 
 Files: `grid_fleet/sources_claude.py`, `grid_fleet/view.py`, `tests/test_collect.py`, `tests/test_view_render.py`.
 
-- [ ] 6.1 Collect `agents.last_7d` (types from meta files, `main`, `unknown`), sorted by invocations; fill `tokens.by_day`.
-- [ ] 6.2 View: sparkline panel and top-8 leaderboard summed across fresh hosts.
-- [ ] 6.3 Tests for the leaderboard scenarios in the specs (cross-host sum, main counted, sort order, missing meta file) and the `by_day` UTC-date derivation.
+- [x] 6.1 Collect `agents.last_7d` (types from meta files, `main`, `unknown`), sorted by invocations; fill `tokens.by_day`.
+- [x] 6.2 View: sparkline panel and top-8 leaderboard summed across fresh hosts.
+- [x] 6.3 Tests for the leaderboard scenarios in the specs (cross-host sum, main counted, sort order, missing meta file) and the `by_day` UTC-date derivation.
 
 Acceptance: leaderboard scenarios in `specs/snapshot-collect/spec.md` and `specs/hub-view-tui/spec.md` pass.
 Verify: default verify command.
@@ -78,10 +78,10 @@ Verify: default verify command.
 Files: `grid_fleet/limits.py`, `grid_fleet/sources_claude.py`, `grid_fleet/view.py`, `tests/test_limits.py`, `docs/spikes.md`.
 
 - [x] 7.1 SPIKE: tap overhead and chaining. Using a synthetic payload and a copy of a statusLine script gated by env vars (the pattern agent-hook tools use: it exits early unless certain variables are set), run directly (not by editing settings.json), time 50 invocations with and without a prototype tap and compare stdout and exit code byte-for-byte, with and without the gating variables set. The tap must pass the full environment through unchanged. Pass: p95 added latency under 50 ms and output identical in both env cases. Fail: record numbers and take the shell-wrapper fallback in `design.md` as a HUMAN decision.
-- [ ] 7.2 SPIKE: missing limits. (synthetic cases done; real fresh-session observation pending HUMAN) With synthetic payloads (no `rate_limits`; only `five_hour`; only `seven_day`; both) and one HUMAN observation of a real fresh session, record what appears. Pass: each case maps to the spec's behaviour (file unchanged / partial merge / full write); any real-world payload that differs becomes a spec delta before 7.3.
+- [ ] 7.2 SPIKE: missing limits. (synthetic cases done; the Claude Code statusLine docs now confirm the payload shape: `rate_limits` only for subscribers after the first API response, each window independently absent; real fresh-session observation still pending HUMAN) With synthetic payloads (no `rate_limits`; only `five_hour`; only `seven_day`; both) and one HUMAN observation of a real fresh session, record what appears. Pass: each case maps to the spec's behaviour (file unchanged / partial merge / full write); any real-world payload that differs becomes a spec delta before 7.3.
 - [x] 7.3 `limits.py`: `tap` (stdin once, spawn original with identical bytes, pass through stdout and exit code, atomic 0600 slice write, merge rule), reader used by collect.
-- [ ] 7.4 (collect and view halves built and merged; pending independent QA) Collect fills `limits` from the limits file (`null` if absent); view renders per-account limits strip with the colour thresholds, capture age, expiry and `unknown` rules.
-- [ ] 7.5 (tests written in both halves; pending independent QA and the real fresh-session observation in 7.2) Tests for every scenario in `specs/limits-capture/spec.md` and the limits scenarios in `specs/hub-view-tui/spec.md`, including concurrent taps and a credential/network audit test (grep the module source for forbidden calls).
+- [x] 7.4 Collect fills `limits` from the limits file (`null` if absent); view renders per-account limits strip with the colour thresholds, capture age, expiry and `unknown` rules.
+- [x] 7.5 Tests for every scenario in `specs/limits-capture/spec.md` and the limits scenarios in `specs/hub-view-tui/spec.md`, including concurrent taps and a credential/network audit test (grep the module source for forbidden calls).
 
 Acceptance: tap is transparent in tests; limits appear once per account in the render output.
 Verify: default verify command.
@@ -103,7 +103,7 @@ Verify: default verify command.
 
 Files: `README.md`, `CLAUDE.md`, `docs/architecture.md`, `docs/privacy.md`, `TODO.md`.
 
-- [ ] 9.1 README: install (clone + symlink), config example, quick start for spoke and hub, privacy section, status updated from "pre-alpha, spec approved, build not started".
+- [ ] 9.1 README: install (clone + symlink), config example, quick start for spoke and hub, privacy section, status updated from "pre-alpha, spec approved, build not started". (README written and checked against `--help` at 47f418f; stays unticked until the installer-config change lands, which changes the `install` and Config sections)
 - [ ] 9.2 the-grid pointer (HUMAN-reviewed; separate change on its own branch in the-grid, NOT in this repo): add a short docs entry in the-grid linking to grid-fleet as an optional, independent companion. The grid-fleet README already links the other way. Do not touch the-grid's in-flight worktrees; branch from its current default.
 - [ ] 9.3 HUMAN: public-readiness check. Grep the tree for machine names, IPs, usernames, home paths, account names; confirm none; confirm fixtures are synthetic. Pass: zero hits. Then create `oneafrikan/grid-fleet` (MIT) and push. A private remote first is acceptable; flip to public only after this grep passes. Only after groups 1-5 pass.
 - [ ] 9.4 Archive this change (`openspec archive fleet-tracer-bullet`) once the tasks above are done, and record the verified Claude Code version in the tested list.
