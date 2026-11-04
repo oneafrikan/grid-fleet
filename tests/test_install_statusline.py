@@ -152,14 +152,44 @@ class TestConfirmedChange(StatuslineCase):
         self.assertIn("after:  " + json.dumps(wrapped), out)
         self.assertIn("all other settings: unchanged", out)
 
-    def test_backup_is_a_byte_copy_with_the_same_mode(self):
-        before = self.write_settings(mode=0o640)
+    def test_backup_is_a_byte_copy_never_wider_than_0600(self):
+        # S4: settings.json may hold secrets, so the backup is the original's mode & 0600:
+        # a world/group-readable original gives an owner-only backup, never the other way.
+        for original_mode, expected in ((0o644, 0o600), (0o640, 0o600), (0o600, 0o600),
+                                        (0o400, 0o400)):
+            with self.subTest(mode=oct(original_mode)):
+                for name in self.backups():  # one backup per sub-case
+                    os.chmod(os.path.join(self.claude, name), 0o600)
+                    os.remove(os.path.join(self.claude, name))
+                if os.path.exists(self.settings):  # the previous case may have left it 0400
+                    os.chmod(self.settings, 0o600)
+                before = self.write_settings(mode=original_mode)
+                self.sl()
+                (name,) = self.backups()
+                backup = os.path.join(self.claude, name)
+                self.assertEqual(os.stat(backup).st_mode & 0o777, expected)
+                self.assertEqual(_readb(backup), before)
+
+    def test_settings_mode_unchanged_when_backup_is_tightened(self):
+        self.write_settings(mode=0o644)
         self.sl()
-        names = self.backups()
-        self.assertEqual(len(names), 1)
-        backup = os.path.join(self.claude, names[0])
-        self.assertEqual(_readb(backup), before)
-        self.assertEqual(os.stat(backup).st_mode & 0o777, 0o640)
+        self.assertEqual(os.stat(self.settings).st_mode & 0o777, 0o644)
+
+    def test_config_dir_created_by_install_is_private(self):
+        # S4: the config dir (and any parent install had to create) is 0700; the config file
+        # itself stays 0600. A config dir that already existed keeps its mode.
+        self.write_settings()
+        self.cfg_path = os.path.join(self.work, "newcfg", "grid-fleet", "config.json")
+        self.sl()
+        for d in (os.path.dirname(self.cfg_path), os.path.dirname(os.path.dirname(self.cfg_path))):
+            self.assertEqual(os.stat(d).st_mode & 0o777, 0o700, d)
+        self.assertEqual(os.stat(self.cfg_path).st_mode & 0o777, 0o600)
+
+    def test_existing_config_dir_mode_is_left_alone(self):
+        self.write_settings()
+        os.chmod(self.cfg_dir, 0o755)
+        self.sl()
+        self.assertEqual(os.stat(self.cfg_dir).st_mode & 0o777, 0o755)
 
     def test_settings_mode_is_preserved(self):
         self.write_settings(mode=0o600)
