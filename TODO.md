@@ -21,8 +21,9 @@ Status at `8421f00` on `main`. The repo is public. Suite at that commit: 722 tes
 - [x] Installer polish landed (commit `a5e3ade` and neighbours): `install` warns, in plan and apply, when `claude` is not on the `PATH` it records (follow-up 8); `--help` description fixed; hub value capped at 255 characters; QA test gaps closed
 - [x] 4.5 done 2026-11-05: the maintainer reviewed the hub view in a real terminal (6 of 6 hosts, limits strip, sparkline, leaderboard); colours and resize behaviour fine as is
 - [x] 9.3 public-readiness gate passed 2026-11-05: grep of the tracked tree and of every added line in the full git history found no machine names, hostnames, usernames, emails or home paths (benign hits only, see `tasks.md`); security review GO; repo flipped public
+- [x] 9.2 the-grid pointer (done 2026-11-05: pushed to the-grid main as 8028bb6, README `## Docs` section)
 - [ ] HUMAN checkpoints pending: 8.1 (timers across sleep and reboot), 2.2 (a real `waiting` row; attempted 2026-11-05, see below)
-- [ ] Gates pending: 9.2 (the-grid pointer: prepared on a local, unpushed branch in the-grid, awaiting maintainer review), 9.4 (archive; record Claude Code 2.1.318)
+- [ ] Gates pending: 9.4 (archive; record Claude Code 2.1.318)
 
 ## How to run it
 
@@ -35,10 +36,9 @@ Status at `8421f00` on `main`. The repo is public. Suite at that commit: 722 tes
 ## Next steps (in order)
 
 1. HUMAN: 8.1 timers across sleep and reboot (runbook below).
-2. HUMAN: review the prepared the-grid pointer branch (9.2) and push it if good.
-3. HUMAN, lowest value: 2.2 a real `waiting` row, with a trigger that always prompts.
-4. 9.4: archive the change and record the verified Claude Code version (2.1.318 was observed on the laptop; the tested list holds 2.1.305).
-5. Decide follow-up 36 (`GRID_FLEET_CLAUDE_BIN` is not recorded in the timer unit).
+2. HUMAN, lowest value: 2.2 a real `waiting` row, with a trigger that always prompts.
+3. 9.4: archive the change and record the verified Claude Code version (2.1.318 was observed on the laptop; the tested list holds 2.1.305).
+4. Decide follow-up 36 (`GRID_FLEET_CLAUDE_BIN` is not recorded in the timer unit).
 
 Standing rules:
 
@@ -53,7 +53,6 @@ Standing rules:
 ## HUMAN-only tasks
 
 - 8.1 timers across sleep (macOS and Linux), see below.
-- 9.2 the-grid docs pointer: prepared on a local, unpushed branch in https://github.com/oneafrikan/the-grid; the maintainer reviews it and pushes. Do not touch the-grid's in-flight worktrees.
 - 9.4 archive the change and record the verified Claude Code version (per `tasks.md`, once the tasks above are done).
 - 2.2 capture a real `waiting` row: trigger a permission prompt in a throwaway interactive session, run `claude agents --json` read-only, record the row's keys (not values) and the wall time in `docs/spikes.md`.
   - Attempted 2026-11-05: the maintainer's Claude Code session auto-allowed the file write, so no prompt appeared and no `waiting` row was captured.
