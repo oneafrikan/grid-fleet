@@ -160,6 +160,9 @@ class HostState:
     interval_s: int = DEFAULT_INTERVAL_S
     busy: Optional[int] = None
     waiting: Optional[int] = None
+    # Interactive sessions open at the prompt. Same null rule as busy/waiting: a null
+    # `sessions` section (or a missing/invalid key, e.g. an older collector) is None = unknown.
+    idle: Optional[int] = None
     out_24h: Optional[int] = None
     out_7d: Optional[int] = None
     cache_24h: Optional[int] = None  # input + cache_creation + cache_read (muted line)
@@ -225,6 +228,7 @@ class HubState:
     fresh: int  # hosts with status FRESH
     busy: Total
     waiting: Total
+    idle: Total
     out_24h: Total
     out_7d: Total
     cache_24h: Total
@@ -388,6 +392,7 @@ def _host_state(entry: Entry, now: int) -> HostState:
         interval_s=interval,
         busy=_count(sessions.get("busy")) if sessions else None,
         waiting=_count(sessions.get("waiting")) if sessions else None,
+        idle=_count(sessions.get("idle")) if sessions else None,
         out_24h=_count(w24.get("output")) if w24 else None,
         out_7d=_count(w7.get("output")) if w7 else None,
         cache_24h=_cache(w24),
@@ -637,6 +642,7 @@ def build_state(scan: InboxScan, now: int, expected_hosts: Iterable[str] = ()) -
         fresh=len(fresh),
         busy=_sum(h.busy for h in fresh),
         waiting=_sum(h.waiting for h in fresh),
+        idle=_sum(h.idle for h in fresh),
         out_24h=_sum(h.out_24h for h in fresh),
         out_7d=_sum(h.out_7d for h in fresh),
         cache_24h=_sum(h.cache_24h for h in fresh),

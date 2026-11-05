@@ -229,6 +229,46 @@ class TestAggregation(HubCase):
         self.assertEqual((s.busy.value, s.waiting.value), (3, 1))
         self.assertEqual(s.out_24h, hub.Total(824000, True))
 
+    def test_idle_is_carried_per_host_and_summed(self):
+        # idle is a first-class count beside busy and waiting.
+        self.put("alpha", sessions={"busy": 0, "waiting": 0, "idle": 1})
+        self.put("beta", sessions={"busy": 1, "waiting": 0, "idle": 2})
+        s = self.read()
+        self.assertEqual(self.host(s, "alpha").idle, 1)
+        self.assertEqual(s.idle, hub.Total(3, True))
+
+    def test_stale_host_idle_not_in_total(self):
+        self.put("alpha", sessions={"busy": 0, "waiting": 0, "idle": 1})
+        self.put("beta", age_s=41 * 60, sessions={"busy": 0, "waiting": 0, "idle": 9})
+        s = self.read()
+        self.assertIsNone(self.host(s, "beta").idle)
+        self.assertEqual(s.idle.value, 1)
+
+    def test_null_sessions_idle_is_none_not_zero(self):
+        self.put("alpha", sessions=NULL)
+        self.assertIsNone(self.host(self.read(), "alpha").idle)
+
+    def test_missing_idle_key_is_unknown_not_zero(self):
+        # An older collector (or a trimmed snapshot) without `idle`: busy/waiting still
+        # count, idle is unknown rather than a made-up 0.
+        self.put("alpha", sessions={"busy": 2, "waiting": 1})
+        h = self.host(self.read(), "alpha")
+        self.assertEqual((h.busy, h.waiting, h.idle), (2, 1, None))
+
+    def test_partial_idle_total_when_a_fresh_host_has_null_sessions(self):
+        self.put("alpha", sessions={"busy": 0, "waiting": 0, "idle": 1})
+        self.put("beta", sessions=NULL)
+        self.assertEqual(self.read().idle, hub.Total(1, False))  # lower bound, flagged
+
+    def test_idle_total_unknown_when_no_fresh_host_reports(self):
+        self.put("alpha", sessions=NULL)
+        self.assertIsNone(self.read().idle.value)
+        self.assertIsNone(hub.build_state(hub.InboxScan(), NOW).idle.value)
+
+    def test_wrong_typed_idle_is_not_trusted(self):
+        self.put("alpha", make_snapshot("alpha", sessions={"busy": 1, "waiting": 0, "idle": "1"}))
+        self.assertIsNone(self.host(self.read(), "alpha").idle)
+
     def test_stale_host_carries_no_metrics(self):
         self.put("beta", age_s=41 * 60)
         h = self.host(self.read(), "beta")
