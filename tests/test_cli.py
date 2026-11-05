@@ -140,6 +140,15 @@ class TestEntryScript(CliCase):
         r = subprocess.run([sys.executable, BIN, "--help"], capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("usage:", r.stdout)
+        # The help is user-facing: no internal ownership note ("Owner: skeleton unit ...").
+        self.assertNotIn("Owner:", r.stdout)
+        self.assertNotIn("LATER UNITS", r.stdout)
+        self.assertNotIn("skeleton", r.stdout)
+
+    def test_parser_description_is_user_facing(self):
+        text = cli.build_parser().format_help()
+        self.assertNotIn("Owner:", text)
+        self.assertNotIn("Group 1", text)
 
     def test_bin_via_symlink(self):
         # Install is "symlink bin/grid-fleet onto PATH"; the package must still be found.
