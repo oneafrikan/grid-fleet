@@ -145,14 +145,15 @@ class TestHostsTable(RenderCase):
         self.put("beta")
         texts = self.text()  # must not raise
         cells = self.row(texts, "alpha").strip("│ ").split()
-        self.assertEqual(cells[3:5], ["unknown", "unknown"])
-        self.assertEqual(self.row(texts, "beta").strip("│ ").split()[3], "412k")
+        # cells: name busy wait idle out24 out7 (the idle column sits before the tokens)
+        self.assertEqual(cells[4:6], ["unknown", "unknown"])
+        self.assertEqual(self.row(texts, "beta").strip("│ ").split()[4], "412k")
 
     def test_null_tokens_render_unknown_and_drop_muted_line(self):
         self.put("alpha", tokens=NULL)
         texts = self.text()
         cells = self.row(texts, "alpha").strip("│ ").split()
-        self.assertEqual(cells[:5], ["alpha", "2", "1", "unknown", "unknown"])
+        self.assertEqual(cells[:6], ["alpha", "2", "1", "0", "unknown", "unknown"])
         self.assertFalse(any("in+cache" in t for t in texts))
 
     def test_stale_host_is_grey_unknown_with_age(self):
@@ -167,11 +168,11 @@ class TestHostsTable(RenderCase):
         self.assertNotIn("412k", row)
 
     def test_stale_host_excluded_from_total(self):
-        self.put("alpha", sessions={"busy": 2, "waiting": 1})
-        self.put("beta", age_s=41 * 60, sessions={"busy": 9, "waiting": 7})
+        self.put("alpha", sessions={"busy": 2, "waiting": 1, "idle": 0})
+        self.put("beta", age_s=41 * 60, sessions={"busy": 9, "waiting": 7, "idle": 5})
         texts = self.text()
         total = self.row(texts, "total").strip("│ ").split()
-        self.assertEqual(total[:5], ["total", "2", "1", "412k", "3.1M"])
+        self.assertEqual(total[:6], ["total", "2", "1", "0", "412k", "3.1M"])
         self.assertTrue(any("1 of 2 hosts fresh" in t for t in texts))
 
     def test_never_reported(self):
@@ -198,7 +199,7 @@ class TestHostsTable(RenderCase):
     def test_total_unknown_with_no_fresh_hosts(self):
         self.put("beta", age_s=41 * 60)
         total = self.row(self.text(), "total").strip("│ ").split()
-        self.assertEqual(total[1:5], ["unknown"] * 4)
+        self.assertEqual(total[1:6], ["unknown"] * 5)
 
     def test_empty_inbox(self):
         texts = self.text()
@@ -220,6 +221,82 @@ class TestHostsTable(RenderCase):
         write_inbox_file(self.state_dir, "alpha.json", snap, NOW - 60)
         out = "\n".join(self.text())
         self.assertNotIn("secret", out)
+
+
+class TestIdleColumn(RenderCase):
+    """The idle column: an open session at the prompt must not look like no session."""
+
+    IDLE_ONLY = {"busy": 0, "waiting": 0, "idle": 1, "other": 0, "total": 1}
+
+    def cells(self, texts, name):
+        return self.row(texts, name).strip("│| ").split()
+
+    def head(self, texts):
+        return next(t for t in texts if t.strip("│| ").startswith("host"))
+
+    def test_header_has_idle_between_wait_and_tokens(self):
+        self.put("alpha", sessions=self.IDLE_ONLY)
+        head = self.head(self.text(width=120, height=30)).split()
+        self.assertEqual(head[:5], ["│", "host", "busy", "wait", "idle"])
+
+    def test_idle_only_host_shows_idle_1_and_total_sums_it(self):
+        self.put("alpha", sessions=self.IDLE_ONLY)
+        self.put("beta", sessions={"busy": 0, "waiting": 0, "idle": 2, "other": 0, "total": 2})
+        for w, h in ((120, 30), (72, 24)):
+            texts = self.text(width=w, height=h)
+            self.assertEqual(self.cells(texts, "alpha")[:4], ["alpha", "0", "0", "1"], w)
+            self.assertEqual(self.cells(texts, "total")[:4], ["total", "0", "0", "3"], w)
+
+    def test_null_sessions_idle_is_unknown(self):
+        self.put("alpha", sessions=NULL)
+        self.assertEqual(self.cells(self.text(width=120, height=30), "alpha")[1:4], ["unknown"] * 3)
+
+    def test_partial_total_is_marked(self):
+        self.put("alpha", sessions=self.IDLE_ONLY)
+        self.put("beta", sessions=NULL)
+        total = self.cells(self.text(width=120, height=30), "total")
+        self.assertEqual(total[3], "1+")
+
+    def test_idle_is_dim_never_busy_or_waiting_colour(self):
+        self.put("alpha", sessions=self.IDLE_ONLY)
+        lines = self.lines(width=120, height=30)
+        row = next(ln for ln in lines if "alpha" in "".join(t for t, _ in ln))
+        # cells are [" ", name, gap, busy, gap, wait, gap, idle, ...]: idle is the third count
+        counts = [(t.strip(), tag) for t, tag in row if t.strip().isdigit()]
+        self.assertEqual(counts[2], ("1", view.DIM))
+
+    def test_ascii_and_no_color_still_say_idle(self):
+        self.put("alpha", sessions=self.IDLE_ONLY)
+        lines = self.lines(width=120, height=30, ascii_mode=True, color=False)
+        texts = view.plain_text(lines)
+        self.assertTrue(all(ord(c) < 128 for t in texts for c in t))
+        self.assertIn("idle", self.head(texts))
+        self.assertEqual(self.cells(texts, "alpha")[:4], ["alpha", "0", "0", "1"])
+        self.assertTrue(all(tag in ("plain", "bold") for ln in lines for _, tag in ln))
+
+    def test_layout_is_exact_width_at_72_and_120(self):
+        self.put("alpha", sessions=self.IDLE_ONLY)
+        self.put("beta", age_s=41 * 60)
+        for w in (72, 120):
+            texts = self.text(width=w, height=30, expected=["gamma"])
+            self.assertTrue(all(len(t) == w for t in texts), (w, [len(t) for t in texts]))
+            self.assertIn("stale 41m", self.row(texts, "beta"))
+
+    def test_idle_column_dropped_at_the_60_col_floor_not_broken(self):
+        # No room at 60x16: busy/wait/tokens/age must stay intact and the box exact.
+        self.put("alpha", sessions=self.IDLE_ONLY)
+        self.put("beta", age_s=41 * 60)
+        texts = self.text(width=60, height=24)
+        self.assertTrue(all(len(t) == 60 for t in texts), [len(t) for t in texts])
+        self.assertNotIn("idle", self.head(texts))
+        self.assertEqual(self.cells(texts, "alpha")[:3], ["alpha", "0", "0"])
+        self.assertIn("stale 41m", self.row(texts, "beta"))
+
+    def test_idle_column_kept_at_the_narrowest_width_that_fits(self):
+        # The cut-over is where host-name and age columns hit their minimums.
+        self.put("alpha", sessions=self.IDLE_ONLY)
+        self.assertNotIn("idle", self.head(self.text(width=62, height=24)))
+        self.assertIn("idle", self.head(self.text(width=63, height=24)))
 
 
 class TestFooter(RenderCase):

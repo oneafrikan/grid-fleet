@@ -9,7 +9,7 @@ The plan is in [`openspec/changes/fleet-tracer-bullet/`](openspec/changes/fleet-
 
 Running Claude Code on several machines gives no single view of the fleet. grid-fleet shows, in one terminal:
 
-- Sessions running on each machine, split busy / waiting.
+- Sessions running on each machine, split busy / waiting / idle (idle is an open session sitting at the prompt).
 - Token usage: output tokens as the headline, input and cache tokens as a muted second line.
 - Which subagent types do the work over the last 7 days (the main session counts as an agent).
 - Your Max-plan 5-hour and 7-day limits, shown once per account, with the age of the capture.
@@ -24,12 +24,12 @@ Synthetic example (80x24, invented host names and numbers):
 │ 5h  ████████▍░░░░░░░░░░░ 42%      resets 13:13 (in 2h07m)  as of 5m ago      │
 │ 7d  ███▋░░░░░░░░░░░░░░░░ 18%      resets Mon 06:06 (in 4d19h)  as of 5m ago  │
 ├ HOSTS ───────────────────────────────────────────────────────────────────────┤
-│ host     busy    wait  out 24h   out 7d  age                                 │
-│ alpha       2       1     412k     3.1M  3m                                  │
+│ host     busy    wait    idle  out 24h   out 7d  age                         │
+│ alpha       2       1       1     412k     3.1M  3m                          │
 │   in+cache 24h 56.3M · 7d 429.6M                                             │
-│ beta  unknown                            stale 41m                           │
+│ beta  unknown                                    stale 41m                   │
 │ gamma unknown (never reported)                                               │
-│ total       2       1     412k     3.1M                                      │
+│ total       2       1       1     412k     3.1M                              │
 ├ OUTPUT TOKENS / DAY (7d) ────┬─ SUBAGENTS (7d, invocations) ─────────────────┤
 │ ▅ ▅ ▆ █ ▇ ▄ ▃  max 700k      │  1 main             ███████████     38   900k │
 │ 10-15 ............ 10-21     │  2 core-researcher  ███             12   210k │

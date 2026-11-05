@@ -16,11 +16,17 @@ Show the whole fleet at a glance in a btop-style terminal dashboard on the hub, 
 - **THEN** the display reflects it within `refresh_s` seconds plus one redraw
 
 ### Requirement: Per-host sessions and tokens
-The view SHALL show for each host the busy and waiting session counts and output tokens for 24 hours and 7 days as the headline, with input plus cache tokens on a separate muted line, and a total row. Token figures use k / M / G with at most one decimal, and a trailing `.0` is dropped (so 400000 renders `400k` and 3100000 renders `3.1M`).
+The view SHALL show for each host the busy, waiting and idle session counts (idle is shown in a muted style, never in the busy or waiting colour) and output tokens for 24 hours and 7 days as the headline, with input plus cache tokens on a separate muted line, and a total row. Token figures use k / M / G with at most one decimal, and a trailing `.0` is dropped (so 400000 renders `400k` and 3100000 renders `3.1M`).
 
 #### Scenario: Fresh host
 - **WHEN** a host snapshot is fresh with 2 busy and 1 waiting sessions
 - **THEN** the host row shows busy 2 and waiting 1
+
+#### Scenario: Idle sessions are visible
+- **WHEN** a host snapshot is fresh with 0 busy, 0 waiting and 1 idle session
+- **THEN** the host row shows busy 0, waiting 0 and idle 1, so it does not look like a host with no session
+- **AND** the total row sums idle across fresh hosts (for example `3` for hosts with 1 and 2 idle)
+- **AND** where the terminal is too narrow for the idle column (the 60-column minimum), the column MAY be dropped, and the other columns are unchanged
 
 #### Scenario: Output is the headline
 - **WHEN** a snapshot has 400 thousand output tokens and 50 million cache-read tokens
@@ -28,7 +34,7 @@ The view SHALL show for each host the busy and waiting session counts and output
 
 #### Scenario: Null section
 - **WHEN** a host's `sessions` is `null`
-- **THEN** its session cells show `unknown`, not 0
+- **THEN** its session cells (busy, waiting and idle) show `unknown`, not 0
 
 #### Scenario: Partial totals
 - **WHEN** a fresh host's `sessions` or `tokens` is `null`
