@@ -2,7 +2,7 @@
 
 A btop-style terminal dashboard for your Claude Code sessions across all your machines.
 
-**Status: pre-alpha. Groups 1-8 are built and independently QA'd: the tracer bullet (collect, push, view), the subagent leaderboard and sparkline, the limits strip, and the timer and statusLine installers. The security review gate is GO. Still pending: real-machine verification of the timers across sleep and of `install --apply` and `install --statusline` (tasks 8.1, 8.5), and the public-readiness gate (9.3).**
+**Status: pre-alpha. Groups 1-8 are built and independently QA'd: the tracer bullet (collect, push, view), the subagent leaderboard and sparkline, the limits strip, and the timer and statusLine installers. The security review gate is GO. Verified on real machines: `install --apply` and `install --statusline` (task 8.5), a fleet of six hosts reporting to one hub, and a real limits capture (7.2). Still pending: the timers across sleep and reboot (8.1), a colour and live-resize check in a real terminal (4.5), and the public-readiness gate (9.3).**
 The plan is in [`openspec/changes/fleet-tracer-bullet/`](openspec/changes/fleet-tracer-bullet/).
 
 ## What it is
@@ -107,6 +107,9 @@ Path: `~/.config/grid-fleet/config.json` (`$XDG_CONFIG_HOME/grid-fleet/config.js
 4. Optional check by hand: `grid-fleet collect` writes a snapshot and prints a one-line summary; `grid-fleet push` sends it to the hub.
 5. Optional: `grid-fleet install --statusline` to capture Max-plan limits.
 
+- On macOS, invoke the installer with the stock interpreter (`/usr/bin/python3 ~/grid-fleet/bin/grid-fleet install ...`): the unit records the interpreter that ran it, and a Homebrew path can vanish on a version bump.
+- When installing over ssh, make sure the directory containing `claude` (often `~/.local/bin`) is on `PATH` for that command: the unit records the `PATH` at install time, and without `claude` on it every tick reports `sessions` as `unknown`.
+- Linux servers that should report while you are logged out need `loginctl enable-linger $USER`. `install` prints the note and never runs it.
 - The alias must work without a prompt: `push` runs `ssh` with `BatchMode=yes` and `ConnectTimeout=10`. Use a key that needs no passphrase prompt (agent or unprotected key).
 - A failed push exits non-zero, logs a one-line reason and keeps the local snapshot. The next tick retries.
 

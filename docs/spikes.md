@@ -289,4 +289,71 @@ Observation (not a contradiction, flag for 7.3):
 Result:
 
 - Synthetic cases: all map to the spec. No spec delta needed from these.
-- Real fresh-session observation: NOT DONE, pending HUMAN.
+- Real fresh-session observation: done 2026-11-05, see "7.2 real observation" below.
+
+## Real-machine results, 2026-11-05 (tasks 7.2, 8.5)
+
+Observed by the maintainer and the orchestrator on real machines. Numbers and facts only; no
+hostnames, paths or payload content beyond the limits fields below.
+
+### 7.2 real observation (first real statusLine payload through the tap)
+
+- Fields present: `rate_limits.seven_day` only, with `used_percentage` 13 and `resets_at` about
+  5.6 days ahead of capture.
+- Fields absent: `rate_limits.five_hour`. The first payload carried no 5-hour window.
+- Units confirmed: `used_percentage` is 0-100; `resets_at` is epoch seconds.
+- File result: `limits.json` was written with `seven_day` only (the partial path). A previously stored
+  synthetic `five_hour` whose `resets_at` was in the past was dropped, not carried forward.
+- View result: the 7d bar showed 13%; the 5h bar showed `unknown  no data`.
+- Verdict: PASS. Matches the spec and the synthetic table above: each window can be independently
+  absent. No spec delta.
+
+### 8.5 single-machine install (macOS laptop)
+
+- `install --hub <hub-alias> --interval 600`: plan reviewed, then `--apply` and `y`.
+- launchd job loaded: `run interval = 600 seconds`, `last exit code = 0`.
+- First tick delivered a snapshot to the hub. The tick log shows `collect:` then `push: delivered (ssh)`.
+- Interpreter recorded in the job: `/Library/Developer/CommandLineTools/usr/bin/python3` (stock
+  macOS Python 3.9, what `/usr/bin/python3` resolves to). Running the installer with Homebrew Python
+  would have recorded a Homebrew path that can vanish on a version bump. Run `install` with
+  `/usr/bin/python3` on macOS.
+- `install --statusline`, run in a real terminal:
+  - The exact before/after of `statusLine.command` was shown. The original was a long third-party
+    agent-hook script (Orca, credited in the README).
+  - The file layout was reproduced, so no rewrite note appeared. All other settings were unchanged.
+  - The maintainer typed `y`. A timestamped backup capped at mode 0600 was written next to
+    `settings.json`.
+  - The tap now runs on every statusLine refresh. `limits.json` was seen updating at the statusLine
+    refresh rate. No errors, and the maintainer saw no visible change.
+
+### 8.5 fleet rollout (six machines)
+
+- Timers installed on all six: four Linux systemd user timers, two macOS launchd jobs.
+- Every host was fresh on the hub within about 10 minutes of its first tick. Ages at the check:
+  52 to 220 s.
+- View on the hub: `6 of 6 hosts fresh`, per-host rows, totals equal to the sum of the rows, the 7d
+  limit bar, the sparkline and the subagent leaderboard.
+- Linger enabled on the three always-on Linux servers and on the Linux laptop, so the timer runs while
+  logged out. The installer prints the note and never runs it.
+
+### Incident: `claude` not on the recorded PATH (sessions null)
+
+- What happened: on one macOS host the timer was installed through a non-interactive ssh command.
+  Its `PATH` did not include the directory holding `claude` (`~/.local/bin`). The installer records
+  the `PATH` at install time, so every tick ran with that `PATH`.
+- Symptom: each tick reported `sessions: null` (the view shows only `unknown`) because
+  `claude agents --json` could not be run. Same cause as bring-up finding 1 above, now seen through
+  a timer.
+- Fix applied: reinstalled the timer with that directory on `PATH` for the install command.
+- Follow-up: an install-time warning in plan/apply when `claude` is not on the recorded `PATH` is in
+  progress in the code (not landed at `a38edcc`). TODO follow-up 8 (PATH recording) bit once.
+  Separate idea, undecided: show a per-host reason for null `sessions` in the view.
+
+### Still open (HUMAN)
+
+- 8.1 timers across sleep and reboot (macOS laptop sleep 3+ minutes with a 60 s throwaway agent; Linux
+  reboot with and without linger).
+- 4.5: a screenshot of the hub view at 6 hosts (limits strip, sparkline, leaderboard) was reviewed from
+  a real terminal and the layout looks right. Colours and live resize are not yet checked.
+- 2.2 a real `waiting` row.
+- Claude Code version observed on the laptop: 2.1.318 (for 9.4).
