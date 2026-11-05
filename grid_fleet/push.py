@@ -17,9 +17,14 @@ What `push` does (spec: push-transport; design.md "Hub"):
        otherwise      -> `ssh -o BatchMode=yes -o ConnectTimeout=10
                          -o ClearAllForwardings=yes -- <alias>
                          "sh -c '<upload script>'"` with the bytes on stdin.
-  4. Failure (ssh non-zero, timeout, cannot spawn): exit EXIT_FAILED, keep the
-     local snapshot, ONE short stderr line, no retry loop. The next timer tick
-     is the retry.
+  4. A transient ssh TRANSPORT failure (exit 255, or the SSH_TIMEOUT_S backstop)
+     is retried inside the same tick: up to 3 attempts, waiting 5 s then 15 s,
+     the same snapshot bytes each time (see deliver_ssh). Nothing else is
+     retried: not a remote script failure (any other non-zero exit), not a
+     config error, not the local hub, not a missing ssh binary.
+  5. Failure (retries used up, a non-retried failure, cannot spawn): exit
+     EXIT_FAILED, keep the local snapshot, ONE short stderr line. The next timer
+     tick is the retry of last resort.
 
 Credentials: this module never reads ~/.ssh or any key/agent state. ssh finds
 the user's own config, keys and agent by itself; we only pass an alias.
@@ -28,11 +33,11 @@ Public API:
 
     push_main(config, args) -> int
     deliver_local(config, data) -> None        atomic write into the local inbox
-    deliver_ssh(config, data) -> None          raises PushError on any failure
+    deliver_ssh(config, data) -> int           attempt number that delivered; raises PushError on failure
     remote_command(host) -> str                the single `sh -c '...'` argument
     validate_hub(hub) -> Optional[str]         None if usable, else a reason
     PushError                                  user-facing failure (message is one line)
-    EXIT_CONFIG, EXIT_FAILED, SSH_TIMEOUT_S
+    EXIT_CONFIG, EXIT_FAILED, SSH_TIMEOUT_S, SSH_RETRY_WAITS_S
 """
 
 import json
@@ -41,6 +46,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 from typing import Optional
 
 from grid_fleet import config as cfg
@@ -57,6 +63,24 @@ EXIT_FAILED = 1
 # handshake; a transfer that stalls afterwards would otherwise block a timer
 # tick forever. Module-level so tests can shrink it.
 SSH_TIMEOUT_S = 60
+
+# Waits before the 2nd and 3rd ssh attempt (seconds); the number of attempts is
+# 1 + len(SSH_RETRY_WAITS_S) = 3. The retry exists because a flaky tunnel can fail
+# roughly 1 connection in 4, and a failed tick would leave the host stale for a whole
+# timer interval.
+#
+# Worst case for ONE push, all three attempts hitting the backstop:
+#     3 x SSH_TIMEOUT_S (60) + 5 + 15 = 200 s
+# That is well under the 600 s default timer interval, so a slow retrying tick cannot
+# overlap the next one in the normal case, and the total stays bounded: no unbounded loop.
+# Module-level so tests can shrink or empty it.
+SSH_RETRY_WAITS_S = (5, 15)
+
+
+def _sleep(seconds: float) -> None:
+    """The retry wait. A module-level indirection so tests replace it and never really sleep."""
+    time.sleep(seconds)
+
 
 # `hub` value meaning "this machine is the hub" (design.md Decided).
 LOCAL_HUB = "local"
@@ -222,8 +246,24 @@ def deliver_local(config, data: bytes) -> None:
         raise
 
 
-def deliver_ssh(config, data: bytes) -> None:
-    """Run ssh once with `data` on stdin. Raises PushError; never retries."""
+class _TransportError(PushError):
+    """One ssh attempt failed at the TRANSPORT level (exit 255 or the timeout backstop).
+
+    The only failure deliver_ssh retries. `reason` is the bare reason class
+    ("ssh exit 255", "timeout after 60s"): it is safe to log (no hub name, no ssh output).
+    """
+
+    def __init__(self, reason: str):
+        super().__init__("push failed (%s); local snapshot kept" % reason)
+        self.reason = reason
+
+
+def _ssh_attempt(config, data: bytes) -> None:
+    """Run ssh once with `data` on stdin.
+
+    Raises _TransportError for exit 255 / timeout (retryable), plain PushError for
+    everything else (not retryable: the remote side ran and refused, or ssh could not start).
+    """
     argv = [
         "ssh",  # resolved via PATH; tests put a fake first
         "-o", "BatchMode=yes",  # never prompt (passphrase, host key, password)
@@ -243,15 +283,45 @@ def deliver_ssh(config, data: bytes) -> None:
             timeout=SSH_TIMEOUT_S,
         )
     except subprocess.TimeoutExpired:
-        raise PushError("push failed (timeout after %ds); local snapshot kept" % SSH_TIMEOUT_S)
+        raise _TransportError("timeout after %ds" % SSH_TIMEOUT_S)
     except OSError as exc:
-        # e.g. ssh not on PATH. strerror only: str(exc) can carry paths.
+        # e.g. ssh not on PATH. strerror only: str(exc) can carry paths. Not retryable.
         raise PushError("push failed (cannot run ssh: %s); local snapshot kept" % (exc.strerror or "error"))
+    if proc.returncode == 255:
+        # ssh's own "the connection failed" status (refused, reset, dropped, unreachable).
+        # The remote script never reported a result, so the same bytes may well work next time.
+        raise _TransportError("ssh exit 255")
     if proc.returncode != 0:
-        # Reason class + exit code only. ssh's own stderr is deliberately NOT
-        # echoed: it can carry host names, addresses and key paths, and this
-        # line lands in timer logs.
+        # Any other status is the REMOTE command's (e.g. the truncation guard refusing the
+        # stream) or an ssh usage error: deterministic for these bytes, so not retried.
+        # Reason class + exit code only. ssh's own stderr is deliberately NOT echoed: it can
+        # carry host names, addresses and key paths, and this line lands in timer logs.
         raise PushError("push failed (ssh exit %d); local snapshot kept" % proc.returncode)
+
+
+def deliver_ssh(config, data: bytes) -> int:
+    """Deliver `data` over ssh, retrying transport failures. Returns the attempt number that worked.
+
+    Up to 1 + len(SSH_RETRY_WAITS_S) attempts (3), waiting SSH_RETRY_WAITS_S between them.
+    Only a _TransportError is retried. `data` is the one set of bytes read before the first
+    attempt and is re-sent unchanged each time; the hub-side script renames atomically and
+    removes a failed attempt's tmp file, so a retry can never leave a half-written <host>.json.
+    Raises PushError (one line) when the attempts are used up or the failure is not retryable.
+    """
+    attempts = 1 + len(SSH_RETRY_WAITS_S)
+    for attempt in range(1, attempts + 1):
+        try:
+            _ssh_attempt(config, data)
+            return attempt
+        except _TransportError as exc:
+            if attempt == attempts:
+                if attempts == 1:  # retries switched off: keep the single-attempt wording
+                    raise
+                raise PushError("push failed (%s) after %d attempts; local snapshot kept"
+                                % (exc.reason, attempts))
+            # Wait before the next attempt; no wait after the last one.
+            _sleep(SSH_RETRY_WAITS_S[attempt - 1])
+    raise AssertionError("unreachable")  # the loop always returns or raises
 
 
 # --- command ----------------------------------------------------------------
@@ -276,15 +346,20 @@ def push_main(config, args) -> int:
     except OSError as exc:
         return _fail("cannot prepare snapshot (%s)" % (exc.strerror or "error"), EXIT_FAILED)
 
+    attempt = 1
     try:
         if config.hub == LOCAL_HUB:
             deliver_local(config, data)
         else:
-            deliver_ssh(config, data)
+            attempt = deliver_ssh(config, data)
     except PushError as exc:
         return _fail(str(exc), EXIT_FAILED)
     except OSError as exc:
         return _fail("cannot write local inbox (%s)" % (exc.strerror or "error"), EXIT_FAILED)
 
-    sys.stdout.write("push: delivered (%s)\n" % ("local" if config.hub == LOCAL_HUB else "ssh"))
+    how = "local" if config.hub == LOCAL_HUB else "ssh"
+    if attempt > 1:
+        # Say so when a retry was needed, so a flaky tunnel shows up in the timer log.
+        how += ", attempt %d of %d" % (attempt, 1 + len(SSH_RETRY_WAITS_S))
+    sys.stdout.write("push: delivered (%s)\n" % how)
     return 0

@@ -58,6 +58,10 @@ Modes (set_mode)
               the hub going away mid-transfer. Exit 255.
     "hang"    sleep far longer than any test timeout (for the push timeout path).
 
+set_sequence(["fail", "ok"], code=255, after=10) picks a mode PER INVOCATION (the Nth ssh run
+uses the Nth entry; the last entry repeats). `code` / `after` apply to every entry. Used by
+the retry tests ("fails with 255, then succeeds"). set_mode() clears any sequence.
+
 The remote command runs with HOME=hub_home and XDG_STATE_HOME unset, so it exercises the
 `${XDG_STATE_HOME:-$HOME/.local/state}` fallback of the real upload script.
 """
@@ -81,6 +85,11 @@ printf '%%s\\n' "$@" > "$D/call-$n.argv"
 for last in "$@"; do :; done
 
 mode=$(cat "$D/mode" 2>/dev/null)
+# set_sequence(): invocation N uses line N of $D/seq; past the end the last line repeats.
+if [ -f "$D/seq" ]; then
+  mode=$(sed -n "${n}p" "$D/seq")
+  [ -n "$mode" ] || mode=$(tail -n 1 "$D/seq")
+fi
 case "$mode" in
   fail)
     echo "ssh: synthetic failure: could not reach hub-alias" >&2
@@ -111,6 +120,9 @@ esac
 """
 
 
+_MODES = ("ok", "fail", "die", "kill_remote", "hang")
+
+
 class FakeSsh:
     def __init__(self, root: Optional[str] = None):
         self._owns_root = root is None
@@ -134,7 +146,24 @@ class FakeSsh:
 
     # -- behaviour ---------------------------------------------------------
     def set_mode(self, mode: str, code: int = 255, after: int = 10) -> None:
-        assert mode in ("ok", "fail", "die", "kill_remote", "hang"), mode
+        assert mode in _MODES, mode
+        self._clear_sequence()
+        self._write(mode, code, after)
+
+    def set_sequence(self, modes: List[str], code: int = 255, after: int = 10) -> None:
+        """Per-invocation modes: the Nth ssh run uses modes[N-1]; the last entry repeats."""
+        assert modes and all(m in _MODES for m in modes), modes
+        self._write(modes[-1], code, after)
+        with open(os.path.join(self._data, "seq"), "w") as fh:
+            fh.write("\n".join(modes) + "\n")
+
+    def _clear_sequence(self) -> None:
+        try:
+            os.unlink(os.path.join(self._data, "seq"))
+        except FileNotFoundError:
+            pass
+
+    def _write(self, mode: str, code: int, after: int) -> None:
         for name, value in (("mode", mode), ("code", code), ("after", after)):
             with open(os.path.join(self._data, name), "w") as fh:
                 fh.write(str(value))
