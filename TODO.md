@@ -2,7 +2,7 @@
 
 ## State
 
-Status at `47f418f` on `main`. Suite: 632 tests OK, 1 skipped (a version-dependent guard test, by design), on `/usr/bin/python3` 3.9.6 and Homebrew 3.14.
+Status at `8a680a0` on `main`. Suite: 696 tests OK, 1 skipped (a version-dependent guard test, by design), on `/usr/bin/python3` 3.9.6.
 
 - [x] Scaffold repo, OpenSpec init
 - [x] Change `fleet-tracer-bullet` drafted and approved (proposal, design, specs, tasks)
@@ -10,24 +10,28 @@ Status at `47f418f` on `main`. Suite: 632 tests OK, 1 skipped (a version-depende
 - [x] Security review (`grid-security-reviewer`): GO to flip public after the doc items. Code findings S3 (unique remote tmp), S4 (backup and dir modes), S5 (hub caps), S6 (ssh hardening, alias charset), S8 (chunked transcript reads) fixed and merged. Doc items done: trust model and custom agent names in the README.
 - [x] Real multi-host bring-up: six machines all report to the hub (3.4 ticked, see `docs/spikes.md`)
 - [x] Group 5 (5.1, 5.2) ticked on the maintainer's sign-off
-- [x] Spikes 2.1 (incl. `CLAUDE_CONFIG_DIR` sub-check) and 2.8 done, recorded in `docs/spikes.md`
+- [x] Spikes 2.1 (incl. `CLAUDE_CONFIG_DIR` sub-check), 2.8, 7.1 (pass) and the synthetic half of 7.2 done, recorded in `docs/spikes.md`
 - [x] Private remote exists and `main` is pushed
-- [ ] In progress, not on `main` at `47f418f`: (a) `install` writes `interval_s`, `hub` and `account` to the config, and `--apply` refuses with no hub; (b) stale hosts' limits count in the limits strip. Both are maintainer decisions (below). README and `tasks.md` 9.1 need a follow-up once (a) and (b) land.
-- [ ] HUMAN checkpoints pending: 8.1, 8.5, 4.5, 7.2, 2.2, then 9.2, 9.3
-- [ ] 9.1 README written but unticked (see above); 9.4 not started
+- [x] Stale hosts' limits are included in the limits strip (merged)
+- [x] `install` writes `interval_s`, `hub` and `account` to the config; `--apply` refuses with no hub (merged)
+- [x] Group 6 QA leftovers closed: full-label agent aggregation, test gaps M13, H17, H18, V04, V12
+- [x] 9.1 README ticked: checked against `--help`, `install` plan mode and the code at `8a680a0`
+- [ ] Installer config write: independent QA in progress. Docs may need a small follow-up if it reports defects.
+- [ ] HUMAN checkpoints pending: 2.2, 4.5, 7.2 (real observation), 8.1, 8.5; then gates 9.2, 9.3
+- [ ] 9.4 not started (after the HUMAN items)
 
 ## How to run it
 
 - Local try-out: `scripts/try-local.sh [--no-view]` (throwaway state dir; collect twice, push to hub `local`, view; cleans up after itself).
 - Tests: `/usr/bin/python3 -m unittest discover -s tests` on macOS (system 3.9); `python3 -m unittest discover -s tests` on Linux.
-- Commands (`bin/grid-fleet --help`): `collect` writes the local snapshot, `push` delivers it to the hub, `view` is the dashboard (run on the hub). `install` prints the timer plan by default; `--apply`, `--statusline` and `--uninstall` need a TTY and a `y` (see README).
-- Config: `~/.config/grid-fleet/config.json`, JSON, e.g. `{"schema":1,"host_name":"<name>","hub":"local"}`. At `47f418f` `install` does not write `hub`, `account` or `interval_s` (change in progress, decision B). Override the path with `GRID_FLEET_CONFIG`; the other `GRID_FLEET_*` overrides are listed in `grid_fleet/config.py`.
+- Commands (`bin/grid-fleet --help`): `collect` writes the local snapshot, `push` delivers it to the hub, `view` is the dashboard (run on the hub). `install --hub <hub-alias> --interval 600` prints the plan (config block and timer files) by default; `--apply`, `--statusline` and `--uninstall` need a TTY and a `y` (see README).
+- Config: `~/.config/grid-fleet/config.json`, JSON, e.g. `{"schema":1,"host_name":"<name>","hub":"local"}`. `install --apply` writes `interval_s`, `hub` and `account` into it. Override the path with `GRID_FLEET_CONFIG`; the other `GRID_FLEET_*` overrides are listed in `grid_fleet/config.py`.
 - Hub mode: `"hub": "local"` copies into the local inbox (no ssh; use on the hub itself); any other value is an ssh alias, used with `BatchMode`.
 
 ## Next steps (in order)
 
-1. Land the two in-progress changes (installer config write, stale-host limits). Re-run the full suite on 3.9 after each. Then update the README `install`, Config and limits wording and tick 9.1.
-2. HUMAN: 8.1 and 8.5 on real machines, then 4.5, 7.2 and 2.2.
+1. Wait for the installer config-write QA. Fix docs only if it reports behaviour that differs from the README.
+2. HUMAN: 8.1 and 8.5 on real machines (runbook below), then 4.5, 7.2 and 2.2.
 3. 9.4: archive the change and record the verified Claude Code version (2.1.318 was observed; the tested list holds 2.1.305).
 4. HUMAN: 9.3 public-readiness grep, then the public flip; 9.2 the-grid pointer.
 
@@ -36,24 +40,51 @@ Standing rules:
 - Read `CLAUDE.md`, then `openspec/changes/fleet-tracer-bullet/{design,tasks}.md` and the five `specs/*/spec.md`, before coding.
 - Keep `docs/spikes.md` current with spike results (numbers only, no hostnames).
 
-## Maintainer decisions (DECIDED; implementation status noted)
+## Maintainer decisions (DECIDED and implemented)
 
-- A. Stale hosts' limits: DECIDED, stale hosts' limits are INCLUDED in the limits strip. Implementation in progress. At `47f418f` the hub builds the strip from fresh hosts only (`grid_fleet/hub.py`, `build_limits`).
-- B. Installer config: DECIDED, `install` writes `interval_s`, `hub` and `account` to the config, and `--apply` refuses with no hub. Implementation in progress. At `47f418f` it does neither (`grid_fleet/install.py` header: hub/account are not written; `--interval` only warns).
+- A. Stale hosts' limits: DECIDED and DONE. Stale hosts' limits are included in the limits strip (`build_limits` in `grid_fleet/hub.py`). Totals, leaderboard and sparkline still exclude stale hosts.
+- B. Installer config: DECIDED and DONE (QA in progress). `install` writes `interval_s`, `hub` and `account` to the config, and `--apply` refuses with no hub (`grid_fleet/install.py`).
 
 ## HUMAN-only tasks
 
-- 2.2 capture a real `waiting` row
-- 4.5 view check in a real terminal: colours and live resize (text-capture layout check at 120x40 and 80x24 is done, see `docs/spikes.md`)
-- 7.2 real fresh-session observation of missing `rate_limits` (the docs confirm the payload shape; the real observation is still wanted)
-- 8.1 timers across sleep (macOS and Linux): laptops sleep, so verify the timers fire after wake or the host goes grey
-- 8.5 real `install --apply` for the timers, and `install --statusline`: both need a TTY, and `--statusline` needs the maintainer's `y` on the exact diff, so an agent cannot run them. Run from a real terminal on one real machine; confirm the timer fires, the hub shows the host, and the original statusLine output is unchanged. The exact wrapped command is shown in that diff (see follow-up 26).
-- 9.2 the-grid docs pointer: separate change on its own branch in https://github.com/oneafrikan/the-grid, HUMAN-reviewed; do not touch its in-flight worktrees
+- 2.2 capture a real `waiting` row: trigger a permission prompt in a throwaway interactive session, run `claude agents --json` read-only, record the row's keys (not values) and the wall time in `docs/spikes.md`.
+- 4.5 view check in a real terminal: colours and live resize (the text-capture layout check at 120x40 and 80x24 is done, see `docs/spikes.md`).
+- 7.2 real fresh-session observation of missing `rate_limits` (the docs confirm the payload shape; the real observation is still wanted). Covered by step (c) of the 8.5 runbook.
+- 8.1 timers across sleep (macOS and Linux), see below.
+- 8.5 real `install --apply` and `install --statusline` on one machine, see the runbook below. Both need a TTY, and `--statusline` needs the maintainer's `y` on the exact diff, so an agent cannot run them.
+- 9.2 the-grid docs pointer: separate change on its own branch in https://github.com/oneafrikan/the-grid, HUMAN-reviewed; do not touch its in-flight worktrees.
 - 9.3 public-readiness gate: grep the tree for machine names, IPs, usernames, home paths, account names. Allowlist: the GitHub handle `oneafrikan` (README/TODO/tasks links) and the copyright holder name in `LICENSE`. Every other machine name, IP, username, home path or account name must have zero hits.
 
 Done and removed from this list: 2.1 `CLAUDE_CONFIG_DIR` sub-check, 2.8 timing, Group 5 checkpoint.
 
-## Known limits / follow-ups (1-16 from QA of groups 1-4, 17-25 from the README unit, 26-32 later; none blocking)
+## 8.5 runbook (HUMAN)
+
+Placeholders: `<hub-alias>` is the ssh alias of the hub from the spoke's `~/.ssh/config` (or `local` on the hub itself). `<state_dir>` defaults to `~/.local/state/grid-fleet`. Unit names below are from `grid_fleet/install.py`.
+
+a. On the machine to onboard, print the plan:
+   - `bin/grid-fleet install --hub <hub-alias> --interval 600`
+   - Review the `config:` block (the before and after of `interval_s`, `hub`, `account`) and the timer plan (interpreter, script, `PATH`, files, commands). Nothing changes yet.
+b. Install the timer:
+   - `bin/grid-fleet install --hub <hub-alias> --interval 600 --apply`, then type `y`. It writes the config first, then loads the timer.
+   - macOS: `launchctl print gui/$(id -u)/io.grid-fleet.timer`. The tick log is `<state_dir>/timer.log`.
+   - Linux: `systemctl --user list-timers grid-fleet.timer` and `journalctl --user -u grid-fleet`. Headless box: run `loginctl enable-linger $USER` yourself (install only prints the note).
+   - Run `bin/grid-fleet view` on the hub and wait one tick (macOS runs once at load, Linux about 30 s after the timer starts, then every interval). Confirm the host's age drops below the interval.
+c. Capture limits:
+   - In a REAL terminal: `bin/grid-fleet install --statusline`. Read the exact before and after of `statusLine.command`, then type `y`.
+   - Start a new Claude Code session and confirm the statusLine looks unchanged.
+   - After the session's first response: `cat <state_dir>/limits.json` shows percentages. This is also the real observation for 7.2. Before the first response the file may not exist; that is the case 7.2 wants recorded.
+d. Roll back:
+   - Timers: `bin/grid-fleet install --uninstall` (the config keys `interval_s`, `hub`, `account` stay).
+   - StatusLine only: `bin/grid-fleet install --statusline --uninstall`.
+   - Backups of the settings file sit next to it as `settings.json.grid-fleet-backup-<UTC time>` (for example `settings.json.grid-fleet-backup-20261104T101530Z`), in `~/.claude/` or `$CLAUDE_CONFIG_DIR/`. They are never pruned and can hold secrets: delete them once you are happy.
+
+## 8.1 sleep spike (HUMAN)
+
+- macOS: load a throwaway launchd agent with a 60 s `StartInterval` that appends timestamps to a temp log, sleep the laptop for 3+ minutes, wake it, read the log for a run within one interval of wake.
+- Linux: a transient `systemd-run --user --on-unit-active=60 ...` timer, then reboot with and without linger and check that a run occurs.
+- Why: laptops sleep; the timers must fire after wake or the host goes grey `unknown` on the hub.
+
+## Known limits / follow-ups (1-16 from QA of groups 1-4, 17-25 from the README unit, 26-32 later, 33-34 from the final docs pass; none blocking)
 
 1. A stored snapshot's `host` is not re-checked against config after a `host_name` rename within `interval_s`; the old `host` is delivered under the new filename (the view uses the filename, so no visible effect).
 2. FIXED (S5): the hub clamps a snapshot's `interval_s` to 3600 (`MAX_INTERVAL_S` in `grid_fleet/hub.py`), so a host claiming a huge interval goes stale.
@@ -74,21 +105,25 @@ Done and removed from this list: 2.1 `CLAUDE_CONFIG_DIR` sub-check, 2.8 timing, 
 17. A restricted receiver (`grid-fleet receive --host NAME`) could back per-spoke forced-command ssh keys, so a spoke can only write its own row. Decided: not in v1; the README Security model documents the trust assumption instead.
 18. Custom agent type names are sent to the hub as written. Decided: document it (README Privacy), do not filter.
 19. A subagent whose meta file says `agentType` `main` or `unknown` merges into the `main` or `unknown` leaderboard bucket.
-20. Hub account labels are cut to 32 ASCII characters, so near-identical long labels can merge into one limits block.
+20. Hub account labels are cut to 32 ASCII characters, so near-identical long labels can merge into one limits block. `install --account` refuses labels the hub would rewrite; a hand-edited config can still hold one.
 21. No warning when `limits.json` is corrupt or unreadable: `limits` is `null` and the view shows `unknown`. Consider a `limits file unreadable` warning.
 22. Limits carry one `captured_at` for both windows, so the capture age can understate the age of a window that was absent from the latest payload. Consider per-window capture times if this matters.
 23. The `.claude/` OpenSpec scaffold exists in git history (commit "openspec init"). Kept (maintainer decision); it is gitignored and untracked now.
 24. `settings.json` backups from `install --statusline` and `--uninstall` accumulate unpruned next to the file. They can hold secrets (README Security model). S4: their mode is the original's mode capped at 0600.
 25. The tap applies no timeout to the original statusLine command, by design: a hung original hangs the statusLine exactly as it would without the tap.
 26. Shell-dialect risk: the wrapper runs the original under `/bin/sh -c`. The Claude Code statusLine docs say the command "runs in a shell" without naming which, and `grid_fleet/install.py` assumes `/bin/sh` (a code comment, not a documented fact). A bash-only original (for example `[[ ]]`) may behave differently under dash. Possible mitigation: run the original under `$SHELL`. The exact wrapped command is shown in the diff at 8.5, so check it there.
-27. Group 6 QA leftovers:
-    - The hub cuts agent labels to 24 characters BEFORE aggregation (`AGENT_TYPE_MAX` in `grid_fleet/hub.py`), so distinct types sharing a 24-character prefix merge. Fix: merge on the full cleaned label and clip only for display.
-    - Test gaps: future-dated hour events in `by_day`; the per-host agent-row cap and by_day-row cap; the 1-cell bar minimum; output-column crowding.
+27. DONE: Group 6 QA leftovers:
+    - The hub now aggregates agent types on the full cleaned label (64-character cap, `AGENT_TYPE_MAX` in `grid_fleet/hub.py`); the view clips for display. See follow-up 33.
+    - Test gaps closed: future-dated hour events in `by_day` (M13), per-host agent-row and by_day-row caps (H17, H18), the 1-cell bar minimum and output-column crowding (V04, V12).
 28. S3 residual: a SIGKILLed or dropped upload leaves a unique dot-prefixed tmp file in the hub inbox that nothing cleans up. Readers ignore it.
 29. S8 residual: one transcript line with no newline is held whole. There is no line-length cap (design decision: the chunked reader bounds reads, not line length).
 30. A limits capture dated more than 5 minutes ahead of the hub clock is ignored (`MAX_CAPTURE_SKEW_S` in `grid_fleet/hub.py`), so a spoke with a badly wrong clock loses its limits display.
 31. A host without read access to the private repo got an archive copy instead of a clone. It becomes a plain clone after the public flip.
 32. Tap latency under saturated load is about 41-43 ms p95 added (`docs/spikes.md` 7.1b). Under the 50 ms bound. The `json` import is the remaining cost.
+33. The view clips the agent type column to at most 20 cells with an ellipsis (`BOARD_TYPE_MAX` in `grid_fleet/view.py`), so distinct long type names that share their first 19 characters look identical on screen even though the hub counts them separately. A view decision: widen the column, or disambiguate.
+34. Two cosmetic code nits found in the final docs pass (docs left as is; route to the dev role):
+    - The plan's `config:` block prints a note that begins `settings.json is not in a layout grid-fleet can reproduce` when the CONFIG file is rewritten in the fallback layout (`_REWRITE_NOTE` in `grid_fleet/install.py` is shared with the settings.json edit).
+    - `bin/grid-fleet --help` shows an internal description ("Owner: skeleton unit (Group 1). LATER UNITS DO NOT EDIT THIS FILE.") instead of a user-facing one.
 
 ## Remote
 
