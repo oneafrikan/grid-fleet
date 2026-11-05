@@ -7,12 +7,17 @@ These are the author's own self-checks, not independent verification.
 """
 
 import os
+import subprocess
+import sys
 import unittest
 
 from grid_fleet import install
 
 from test_install import FakeRunner
 from test_install_config import ConfigCase
+
+BIN = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                   "bin", "grid-fleet")
 
 
 class ClaudeCase(ConfigCase):
@@ -178,6 +183,40 @@ class TestConfigOnlyChangeWording(ConfigCase):
         self.assertIn("installed", tail)
         self.assertIn("logs:", tail)
         self.assertNotIn("timer unchanged", tail)
+
+
+class TestBareDoubleDashFlagValue(ConfigCase):
+    """`--hub=--` / `--account=--` reach install_main as `[]` on Python 3.9 (argparse eats
+    the `--`). The error must not print `[]`."""
+
+    def test_non_string_values_get_a_clear_message(self):
+        for flag in ("hub", "account"):
+            rc, _out, err = self.run_install(**{flag: []})
+            self.assertEqual(rc, install.EXIT_USAGE)
+            self.assertIn("invalid --%s value" % flag, err)
+            self.assertNotIn("[]", err)
+        self.assertEqual(self.tree(), [self.home])  # nothing written
+
+    def test_a_string_value_is_still_echoed(self):
+        rc, _out, err = self.run_install(hub="bad host")
+        self.assertEqual(rc, install.EXIT_USAGE)
+        self.assertIn("invalid --hub 'bad host'", err)
+
+    def test_real_cli_process_never_prints_empty_brackets(self):
+        # Same interpreter as the suite: on 3.9 this is the `[]` path; newer Pythons keep
+        # the string, so `--hub=--` is rejected by the validator and `--account=--` is a
+        # legal label (non-empty printable ASCII) and is accepted. Never any `[]`.
+        env = dict(os.environ, GRID_FLEET_CONFIG=self.cfg_path, GRID_FLEET_STATE_DIR=self.state,
+                   GRID_FLEET_CLAUDE_DIR=os.path.join(self.work, "claude"), HOME=self.home)
+        r = subprocess.run([sys.executable, BIN, "install", "--hub=--"], env=env,
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertNotIn("[]", r.stderr)
+        self.assertIn("--hub", r.stderr)
+        r = subprocess.run([sys.executable, BIN, "install", "--account=--"], env=env,
+                           capture_output=True, text=True)
+        self.assertIn(r.returncode, (0, 2), r.stderr)  # 0 on newer Pythons, 2 on 3.9
+        self.assertNotIn("[]", r.stderr)
 
 
 if __name__ == "__main__":

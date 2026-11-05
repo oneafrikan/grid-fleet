@@ -1180,7 +1180,12 @@ def install_main(config, args, *, runner: Optional[Runner] = None,
                                ("--account", explicit_account, validate_account)):
         reason = check(value) if value is not None else None
         if reason is not None:
-            sys.stderr.write("grid-fleet install: invalid %s %r: %s\n" % (flag, value, reason))
+            # Python 3.9's argparse swallows a lone `--` in `--hub=--` and hands over `[]`
+            # instead of the string, so the original text is gone. Echo only a real string;
+            # otherwise say plainly the value is invalid rather than print `[]`.
+            shown = ("%s %r" % (flag, value) if isinstance(value, str)
+                     else "%s value" % flag)
+            sys.stderr.write("grid-fleet install: invalid %s: %s\n" % (shown, reason))
             return EXIT_USAGE
     try:
         kind = system_kind(platform if platform is not None else sys.platform)
