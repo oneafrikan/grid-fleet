@@ -164,7 +164,7 @@ Two more machines were onboarded as spokes later, so six hosts now report to the
 
 - Each ran `collect` and `push`; both deliveries reached the hub. All six hosts now have an inbox file.
 - The server could not read the private repo with its own GitHub identity, so it received a
-  `git archive` copy without `.git`. It becomes a plain clone once the repo is public.
+  `git archive` copy without `.git`. The repo is public now, so that host can use a plain clone.
 
 Stale-versus-fresh observation:
 

@@ -2,7 +2,7 @@
 
 ## State
 
-Status at `a38edcc` on `main`. Suite at `8a680a0`: 696 tests OK, 1 skipped (a version-dependent guard test, by design), on `/usr/bin/python3` 3.9.6. Not re-run for the docs-only commits since.
+Status at `8421f00` on `main`. The repo is public. Suite at that commit: 722 tests OK, 1 skipped (a version-dependent guard test, by design), on `/usr/bin/python3` 3.9.6 and Homebrew Python 3.14. Not re-run for the docs-only commits since.
 
 - [x] Scaffold repo, OpenSpec init
 - [x] Change `fleet-tracer-bullet` drafted and approved (proposal, design, specs, tasks)
@@ -11,17 +11,18 @@ Status at `a38edcc` on `main`. Suite at `8a680a0`: 696 tests OK, 1 skipped (a ve
 - [x] Real multi-host bring-up: six machines all report to the hub (3.4 ticked, see `docs/spikes.md`)
 - [x] Group 5 (5.1, 5.2) ticked on the maintainer's sign-off
 - [x] Spikes 2.1 (incl. `CLAUDE_CONFIG_DIR` sub-check), 2.8, 7.1 (pass) and 7.2 (synthetic and real) done, recorded in `docs/spikes.md`
-- [x] Private remote exists and `main` is pushed
+- [x] Repo is public (`oneafrikan/grid-fleet`, flipped by the maintainer 2026-11-05) and `main` is pushed
 - [x] Stale hosts' limits are included in the limits strip (merged)
 - [x] `install` writes `interval_s`, `hub` and `account` to the config; `--apply` refuses with no hub (merged)
 - [x] Group 6 QA leftovers closed: full-label agent aggregation, test gaps M13, H17, H18, V04, V12
 - [x] 9.1 README ticked: checked against `--help`, `install` plan mode and the code at `8a680a0`
 - [x] 8.5 done 2026-11-05: install plan, `--apply` and `--statusline` on one laptop, then timers on all six machines; the hub view shows `6 of 6 hosts fresh` (see `docs/spikes.md`)
 - [x] 7.2 real observation done 2026-11-05: first real payload had `seven_day` only (13%), no `five_hour`; matches the spec
-- [ ] Installer config write: independent QA in progress. Docs may need a small follow-up if it reports defects.
-- [ ] In progress in the code unit (not landed at `a38edcc`): install-time warning when `claude` is not on the recorded `PATH` (follow-up 8)
-- [ ] HUMAN checkpoints pending: 8.1 (timers across sleep and reboot), 4.5 (layout confirmed from a real terminal screenshot; colours and live resize pending), 2.2 (a real `waiting` row)
-- [ ] Gates pending: 9.2 (the-grid pointer), 9.3 (public-readiness grep), 9.4 (archive; record Claude Code 2.1.318)
+- [x] Installer polish landed (commit `a5e3ade` and neighbours): `install` warns, in plan and apply, when `claude` is not on the `PATH` it records (follow-up 8); `--help` description fixed; hub value capped at 255 characters; QA test gaps closed
+- [x] 4.5 done 2026-11-05: the maintainer reviewed the hub view in a real terminal (6 of 6 hosts, limits strip, sparkline, leaderboard); colours and resize behaviour fine as is
+- [x] 9.3 public-readiness gate passed 2026-11-05: grep of the tracked tree and of every added line in the full git history found no machine names, hostnames, usernames, emails or home paths (benign hits only, see `tasks.md`); security review GO; repo flipped public
+- [ ] HUMAN checkpoints pending: 8.1 (timers across sleep and reboot), 2.2 (a real `waiting` row; attempted 2026-11-05, see below)
+- [ ] Gates pending: 9.2 (the-grid pointer: prepared on a local, unpushed branch in the-grid, awaiting maintainer review), 9.4 (archive; record Claude Code 2.1.318)
 
 ## How to run it
 
@@ -33,10 +34,11 @@ Status at `a38edcc` on `main`. Suite at `8a680a0`: 696 tests OK, 1 skipped (a ve
 
 ## Next steps (in order)
 
-1. Wait for the installer config-write QA and the `claude`-not-on-PATH install warning. Fix docs only if either reports behaviour that differs from the README.
-2. HUMAN: 8.1 timers across sleep and reboot (runbook below), then 4.5 colours and live resize, and 2.2 a real `waiting` row.
-3. HUMAN: 9.3 public-readiness grep, then the public flip; 9.2 the-grid pointer.
+1. HUMAN: 8.1 timers across sleep and reboot (runbook below).
+2. HUMAN: review the prepared the-grid pointer branch (9.2) and push it if good.
+3. HUMAN, lowest value: 2.2 a real `waiting` row, with a trigger that always prompts.
 4. 9.4: archive the change and record the verified Claude Code version (2.1.318 was observed on the laptop; the tested list holds 2.1.305).
+5. Decide follow-up 36 (`GRID_FLEET_CLAUDE_BIN` is not recorded in the timer unit).
 
 Standing rules:
 
@@ -46,17 +48,18 @@ Standing rules:
 ## Maintainer decisions (DECIDED and implemented)
 
 - A. Stale hosts' limits: DECIDED and DONE. Stale hosts' limits are included in the limits strip (`build_limits` in `grid_fleet/hub.py`). Totals, leaderboard and sparkline still exclude stale hosts.
-- B. Installer config: DECIDED and DONE (QA in progress). `install` writes `interval_s`, `hub` and `account` to the config, and `--apply` refuses with no hub (`grid_fleet/install.py`).
+- B. Installer config: DECIDED and DONE (independently QA'd). `install` writes `interval_s`, `hub` and `account` to the config, and `--apply` refuses with no hub (`grid_fleet/install.py`).
 
 ## HUMAN-only tasks
 
-- 2.2 capture a real `waiting` row: trigger a permission prompt in a throwaway interactive session, run `claude agents --json` read-only, record the row's keys (not values) and the wall time in `docs/spikes.md`.
-- 4.5 view check in a real terminal: colours and live resize. The layout is confirmed (text capture at 120x40 and 80x24, and a real-terminal screenshot at 6 hosts with limits strip, sparkline and leaderboard); leave unticked until the colour and resize check is recorded.
 - 8.1 timers across sleep (macOS and Linux), see below.
-- 9.2 the-grid docs pointer: separate change on its own branch in https://github.com/oneafrikan/the-grid, HUMAN-reviewed; do not touch its in-flight worktrees.
-- 9.3 public-readiness gate: grep the tree for machine names, IPs, usernames, home paths, account names. Allowlist: the GitHub handle `oneafrikan` (README/TODO/tasks links) and the copyright holder name in `LICENSE`. Every other machine name, IP, username, home path or account name must have zero hits.
+- 9.2 the-grid docs pointer: prepared on a local, unpushed branch in https://github.com/oneafrikan/the-grid; the maintainer reviews it and pushes. Do not touch the-grid's in-flight worktrees.
+- 9.4 archive the change and record the verified Claude Code version (per `tasks.md`, once the tasks above are done).
+- 2.2 capture a real `waiting` row: trigger a permission prompt in a throwaway interactive session, run `claude agents --json` read-only, record the row's keys (not values) and the wall time in `docs/spikes.md`.
+  - Attempted 2026-11-05: the maintainer's Claude Code session auto-allowed the file write, so no prompt appeared and no `waiting` row was captured.
+  - Still open, lowest value. It needs a trigger that always prompts, for example a different permission mode.
 
-Done and removed from this list: 2.1 `CLAUDE_CONFIG_DIR` sub-check, 2.8 timing, Group 5 checkpoint, 7.2 real observation and 8.5 (both 2026-11-05).
+Done and removed from this list: 2.1 `CLAUDE_CONFIG_DIR` sub-check, 2.8 timing, Group 5 checkpoint, 7.2 real observation and 8.5 (all 2026-11-05), 4.5 colours and resize check, 9.3 public-readiness gate and the public flip (both 2026-11-05).
 
 ## 8.5 runbook (HUMAN, done 2026-11-05; kept for onboarding new machines)
 
@@ -90,7 +93,7 @@ d. Roll back:
 - Linux: a transient `systemd-run --user --on-unit-active=60 ...` timer, then reboot with and without linger and check that a run occurs.
 - Why: laptops sleep; the timers must fire after wake or the host goes grey `unknown` on the hub.
 
-## Known limits / follow-ups (1-16 from QA of groups 1-4, 17-25 from the README unit, 26-32 later, 33-34 from the final docs pass, 35 from the 8.5 rollout; none blocking)
+## Known limits / follow-ups (1-16 from QA of groups 1-4, 17-25 from the README unit, 26-32 later, 33-34 from the final docs pass, 35 from the 8.5 rollout, 36 from the installer polish; none blocking)
 
 1. A stored snapshot's `host` is not re-checked against config after a `host_name` rename within `interval_s`; the old `host` is delivered under the new filename (the view uses the filename, so no visible effect).
 2. FIXED (S5): the hub clamps a snapshot's `interval_s` to 3600 (`MAX_INTERVAL_S` in `grid_fleet/hub.py`), so a host claiming a huge interval goes stale.
@@ -99,7 +102,7 @@ d. Roll back:
 5. FIXED (S6): the hub alias is limited to `[A-Za-z0-9._@:-]` with no leading `-`, and `push` passes `-o ClearAllForwardings=yes` and `--` before the alias (`grid_fleet/push.py`).
 6. `tests/test_guard.py` scans `grid_fleet/` only, not `bin/grid-fleet`, and checks only `match`, `X | Y` annotations and imports.
 7. The upload completeness check catches truncation, not every short stream that ends in a newline (tool-written snapshots are one line plus a newline, so the known gap cannot occur for them).
-8. `claude` is not on the non-interactive ssh PATH on hosts that install it in `~/.local/bin`, so `sessions` is null with warning `claude agents unavailable`. BIT US ONCE at 8.5: a macOS timer installed over ssh recorded a PATH without `claude`, every tick reported `sessions: null`, and reinstalling with the directory on PATH fixed it. The installer (8.2) records the install-time PATH in the unit. An install-time warning when `claude` is not on the recorded PATH is in progress (not landed at `a38edcc`). Config has no `claude` path key; only `GRID_FLEET_CLAUDE_BIN` or PATH can fix it.
+8. `claude` is not on the non-interactive ssh PATH on hosts that install it in `~/.local/bin`, so `sessions` is null with warning `claude agents unavailable`. BIT US ONCE at 8.5: a macOS timer installed over ssh recorded a PATH without `claude`, every tick reported `sessions: null`, and reinstalling with the directory on PATH fixed it. The installer (8.2) records the install-time PATH in the unit. An install-time warning (plan and apply) when `claude` is not on the recorded PATH has landed (`a5e3ade`). Config has no `claude` path key; only `GRID_FLEET_CLAUDE_BIN` or PATH can fix it (see follow-up 36).
 9. Add the verified Claude Code version to the tested list at 9.4 (the list holds 2.1.305; 2.1.318 was observed on the reference laptop; other versions warn).
 10. DONE: all six machines are onboarded as spokes. Per-host config lives outside the repo on each machine by design; do not record host details here.
 11. DONE: security review gate (`grid-security-reviewer`): GO to flip public after the doc items, which are done.
@@ -124,18 +127,20 @@ d. Roll back:
 28. S3 residual: a SIGKILLed or dropped upload leaves a unique dot-prefixed tmp file in the hub inbox that nothing cleans up. Readers ignore it.
 29. S8 residual: one transcript line with no newline is held whole. There is no line-length cap (design decision: the chunked reader bounds reads, not line length).
 30. A limits capture dated more than 5 minutes ahead of the hub clock is ignored (`MAX_CAPTURE_SKEW_S` in `grid_fleet/hub.py`), so a spoke with a badly wrong clock loses its limits display.
-31. A host without read access to the private repo got an archive copy instead of a clone. It becomes a plain clone after the public flip.
+31. DONE: a host without read access to the then-private repo got an archive copy instead of a clone. The repo is public now, so that host can use a plain clone; the per-host conversion is tracked outside this repo.
 32. Tap latency under saturated load is about 41-43 ms p95 added (`docs/spikes.md` 7.1b). Under the 50 ms bound. The `json` import is the remaining cost.
 33. The view clips the agent type column to at most 20 cells with an ellipsis (`BOARD_TYPE_MAX` in `grid_fleet/view.py`), so distinct long type names that share their first 19 characters look identical on screen even though the hub counts them separately. A view decision: widen the column, or disambiguate.
 34. Two cosmetic code nits found in the final docs pass (docs left as is; route to the dev role):
     - The plan's `config:` block prints a note that begins `settings.json is not in a layout grid-fleet can reproduce` when the CONFIG file is rewritten in the fallback layout (`_REWRITE_NOTE` in `grid_fleet/install.py` is shared with the settings.json edit).
-    - `bin/grid-fleet --help` shows an internal description ("Owner: skeleton unit (Group 1). LATER UNITS DO NOT EDIT THIS FILE.") instead of a user-facing one.
+    - FIXED: `bin/grid-fleet --help` showed an internal description instead of a user-facing one.
 35. Idea, not a decision: the view could show a per-host reason when `sessions` is null (today it shows only `unknown`), for example `claude agents unavailable` from the snapshot warning. Motivated by the 8.5 PATH incident (follow-up 8).
+
+36. `GRID_FLEET_CLAUDE_BIN` is honoured by the install-time `claude` warning but is NOT recorded in the timer unit (only `PATH` is). A user who relies on that variable gets no warning, yet their ticks will not see it. Fix options: record it in the unit, or add a `claude_bin` config key. Found by the installer polish agent.
 
 ## Remote
 
-- Remote created (private) and `main` is pushed.
-- Flip to public only after the 9.3 grep passes. The security gate is GO (doc items done).
+- `origin` is `oneafrikan/grid-fleet`, PUBLIC (flipped 2026-11-05 after the 9.3 grep passed and the security gate was GO). `main` is pushed.
+- Do not change visibility or the remote without the maintainer.
 
 ## Future decisions: outcomes roster (v2 idea, undecided)
 

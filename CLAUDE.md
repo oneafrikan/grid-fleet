@@ -4,7 +4,7 @@
 
 `grid-fleet`: terminal dashboard (Python, stdlib only) for Claude Code sessions, tokens,
 subagent usage and Max-plan limits across a fleet of machines.
-Status: spec approved (`openspec/changes/fleet-tracer-bullet/`). Groups 1-8 built, QA'd and verified on real machines (tracer bullet, leaderboard and sparkline, limits strip, installers; 7.2 and 8.5 done 2026-11-05, six hosts fresh); security gate GO. Group 5 is signed off. `install --apply` also writes `interval_s`, `hub` and `account` to the config (QA of that write in progress). 9.1 (README) is done. Pending HUMAN checkpoints: 8.1 (sleep spike), 4.5 (colours and resize), 2.2 (a real `waiting` row). Pending gates: 9.2 (the-grid pointer), 9.3 (public-readiness), 9.4 (archive). The 8.1 and 8.5 runbooks are in `TODO.md`.
+Status: spec approved (`openspec/changes/fleet-tracer-bullet/`). Groups 1-8 built, QA'd and verified on real machines (tracer bullet, leaderboard and sparkline, limits strip, installers; 7.2, 8.5 and 4.5 done 2026-11-05, six hosts fresh); security gate GO. Group 5 is signed off. `install --apply` also writes `interval_s`, `hub` and `account` to the config, and warns when `claude` is not on the recorded `PATH`. 9.1 (README) is done. 9.3 public-readiness passed 2026-11-05 and the repo is public. Open: 8.1 (sleep spike, HUMAN), 2.2 (a real `waiting` row, HUMAN, lowest value), 9.2 (the-grid pointer, prepared, awaiting maintainer review), 9.4 (archive, record the verified Claude Code version). The 8.1 and 8.5 runbooks are in `TODO.md`.
 
 ## Hard constraints
 
@@ -69,6 +69,7 @@ Intended specialist agents (the-grid names):
 
 ## Git
 
-- A private remote `origin` exists (`oneafrikan/grid-fleet`, pushed over ssh with the maintainer's personal-account identity). Commit and push `main` after each logical unit.
-- Do not change the remote, flip it public, or create other remotes. The public flip happens only after the 9.3 public-readiness grep passes (see `TODO.md`).
+- The repo is PUBLIC (`oneafrikan/grid-fleet`, remote `origin`). Commit and push `main` after each logical unit.
+- Do not change the repo's visibility or its remote, or create other remotes, without the maintainer.
+- Everything pushed is world-readable: the hygiene rules above apply to every commit.
 - Commit style: `type(scope): subject` (feat, fix, docs, spec, chore). Commit after each logical unit.
