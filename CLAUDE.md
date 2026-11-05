@@ -4,7 +4,7 @@
 
 `grid-fleet`: terminal dashboard (Python, stdlib only) for Claude Code sessions, tokens,
 subagent usage and Max-plan limits across a fleet of machines.
-Status: spec approved (`openspec/changes/fleet-tracer-bullet/`). Groups 1-8 built, QA'd and verified on real machines (tracer bullet, leaderboard and sparkline, limits strip, installers; 7.2, 8.5 and 4.5 done 2026-11-05, six hosts fresh); security gate GO. Group 5 is signed off. `install --apply` also writes `interval_s`, `hub` and `account` to the config, and warns when `claude` is not on the recorded `PATH`. 9.1 (README) is done. 9.3 public-readiness passed 2026-11-05 and the repo is public. Open: 8.1 (sleep spike, HUMAN), 2.2 (a real `waiting` row, HUMAN, lowest value), 9.2 (the-grid pointer, prepared, awaiting maintainer review), 9.4 (archive, record the verified Claude Code version). The 8.1 and 8.5 runbooks are in `TODO.md`.
+Status: change `fleet-tracer-bullet` is archived (`openspec/changes/archive/2026-11-05-fleet-tracer-bullet/`); its five specs are now current truth in `openspec/specs/`. Groups 1-9 are done: built, QA'd and verified on real machines (tracer bullet, leaderboard and sparkline, limits strip, idle column, installers; six hosts fresh); security gate GO; the repo is public (9.3, 2026-11-05). `install --apply` also writes `interval_s`, `hub` and `account` to the config, and warns when `claude` is not on the recorded `PATH`. Verified Claude Code versions are in the tested list (`TESTED_VERSIONS`). Open items in the archived `tasks.md`, both unticked on purpose: 8.1 (timers across sleep and reboot) is PARKED until the maintainer next travels with a laptop; 2.2 (a real `waiting` row) is DROPPED (maintainer, 2026-11-05). The 8.1 and 8.5 runbooks are in `TODO.md`.
 
 ## Hard constraints
 
@@ -33,20 +33,22 @@ Status: spec approved (`openspec/changes/fleet-tracer-bullet/`). Groups 1-8 buil
 
 ## OpenSpec workflow
 
-- Specs live in `openspec/`. Current work: `openspec/changes/fleet-tracer-bullet/`.
-- Read `specs/*/spec.md`, `design.md` and `tasks.md` of the change before coding.
-- Do not edit current truth: `openspec/specs/` changes only via archive. Spec changes go in the change's deltas.
+- Specs live in `openspec/`. Current truth is `openspec/specs/<capability>/spec.md` (five capabilities, created by archiving `fleet-tracer-bullet`). Read the relevant spec before coding.
+- No change is in flight. `fleet-tracer-bullet` is archived under `openspec/changes/archive/2026-11-05-fleet-tracer-bullet/` (history only: do not work in it). New work starts a new change (`openspec new change <name>`, or `/openspec-propose`); stop for human review before implementing.
+- Do not edit current truth: `openspec/specs/` changes only via archive. Spec changes go in the new change's deltas.
 - If implementation proves the spec wrong, update the delta; never diverge silently.
 - Do not re-decide anything marked `Decided:` in `design.md`.
-- `openspec list`, `openspec show <change>`, `openspec validate <change> --strict`.
+- `openspec list`, `openspec show <change>`, `openspec validate <change> --strict`, `openspec validate --specs --strict`.
 
 ## Build order
 
+Historical: the original build order of the archived change, all done.
+
 1. Groups 1-4 in `tasks.md` (tracer bullet: skeleton, collect, push, minimal view): done.
 2. Group 5 is a HUMAN checkpoint: signed off by the maintainer (5.1, 5.2 ticked).
-3. Groups 6-8 (leaderboard, limits, installers): built and QA'd. Group 9 (docs): 9.1 done; 9.2-9.4 pending. Tasks marked `HUMAN:` are for the human only.
+3. Groups 6-8 (leaderboard, limits, installers): built and QA'd. Group 9 (docs): 9.1-9.4 done. Tasks marked `HUMAN:` are for the human only.
 
-Intended specialist agents (the-grid names):
+Specialist agents used (the-grid names), and the default routing for new work:
 
 | Group | Agent |
 |---|---|

@@ -371,8 +371,10 @@ hostnames, paths or payload content beyond the limits fields below.
 ### Still open (HUMAN)
 
 - 8.1 timers across sleep and reboot (macOS laptop sleep 3+ minutes with a 60 s throwaway agent; Linux
-  reboot with and without linger).
+  reboot with and without linger). PARKED (maintainer, 2026-11-05): to be run on the next laptop trip,
+  result reported back.
 - 4.5: a screenshot of the hub view at 6 hosts (limits strip, sparkline, leaderboard) was reviewed from
   a real terminal and the layout looks right. Colours and live resize are not yet checked.
-- 2.2 a real `waiting` row.
-- Claude Code version observed on the laptop: 2.1.318 (for 9.4).
+- 2.2 a real `waiting` row: DROPPED (maintainer, 2026-11-05), current evidence is enough. Not verified.
+- Claude Code version observed on the laptop: 2.1.318. Recorded in the tested list with 2.1.304, 2.1.305
+  and 2.1.311 (9.4, done); the change is archived.

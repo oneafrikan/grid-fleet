@@ -2,7 +2,7 @@
 
 ## State
 
-Status at `2cc9a52` on `main`. The repo is public. Suite at that commit: 735 tests OK, 1 skipped (a version-dependent guard test, by design), on `/usr/bin/python3` 3.9.6 (run 2026-11-05). The 722 count at `8421f00` was also seen on Homebrew Python 3.14; the 735 run was 3.9 only.
+Status at `fa171a2` on `main`. The repo is public. Change `fleet-tracer-bullet` is archived (2026-11-05). Suite at that commit: 761 tests OK, 1 skipped (a version-dependent guard test, by design), on `/usr/bin/python3` 3.9.6 (run 2026-11-05). The 722 count at `8421f00` was also seen on Homebrew Python 3.14; the 761 run was 3.9 only.
 
 - [x] Scaffold repo, OpenSpec init
 - [x] Change `fleet-tracer-bullet` drafted and approved (proposal, design, specs, tasks)
@@ -24,8 +24,10 @@ Status at `2cc9a52` on `main`. The repo is public. Suite at that commit: 735 tes
 - [x] 9.2 the-grid pointer (done 2026-11-05: pushed to the-grid main as 8028bb6, README `## Docs` section)
 - [x] Push retry merged (`2cc9a52`): `push` retries transient ssh transport failures within one tick (up to 3 attempts, 5 s then 15 s apart; only ssh exit 255 or the 60 s backstop timeout; see README). Independent QA of the retry is in progress.
 - [x] Hub tunnel fixed 2026-11-05 (maintainer, on the hub: `protocol: http2` in the tunnel config, then a service restart). About 1 in 4 spoke connections had been failing; afterwards 12 of 12 test connections succeeded and all six hosts were fresh. Infrastructure, not a grid-fleet bug; record in `docs/spikes.md`.
-- [ ] HUMAN checkpoints pending: 8.1 (timers across sleep and reboot), 2.2 (a real `waiting` row; attempted 2026-11-05, see below)
-- [ ] Gates pending: QA of the push retry (in progress); 9.4 (archive; the tested list already holds 2.1.304, 2.1.305, 2.1.311 and 2.1.318)
+- [x] 9.4 done 2026-11-05: `openspec archive fleet-tracer-bullet` ran; the five specs are now in `openspec/specs/` and the change is under `openspec/changes/archive/2026-11-05-fleet-tracer-bullet/`. The tested list holds 2.1.304, 2.1.305, 2.1.311 and 2.1.318.
+- [ ] 8.1 PARKED (maintainer, 2026-11-05): timers across sleep and reboot; the maintainer will run it when they next travel with a laptop and report back. Left unticked in the archived `tasks.md`.
+- [ ] 2.2 DROPPED (maintainer, 2026-11-05): a real `waiting` row is not worth doing, current evidence is enough. Not verified; left unticked in the archived `tasks.md`.
+- [ ] Gates pending: QA of the push retry (in progress)
 
 ## How to run it
 
@@ -38,14 +40,13 @@ Status at `2cc9a52` on `main`. The repo is public. Suite at that commit: 735 tes
 ## Next steps (in order)
 
 1. Land the independent QA verdict on the push retry (in progress), then act on any findings.
-2. HUMAN: 8.1 timers across sleep and reboot (runbook below; waiting for the maintainer).
-3. HUMAN, lowest value: 2.2 a real `waiting` row, with a trigger that always prompts.
-4. 9.4: archive the change (the verified Claude Code versions are already in the tested list: 2.1.304, 2.1.305, 2.1.311 and 2.1.318).
-5. Decide follow-up 36 (`GRID_FLEET_CLAUDE_BIN` is not recorded in the timer unit).
+2. PARKED: 8.1 timers across sleep and reboot (runbook below; the maintainer runs it on their next laptop trip and reports back).
+3. Follow-ups 36-43 and similar small known issues are PARKED until they bite; decide follow-up 36 (`GRID_FLEET_CLAUDE_BIN` is not recorded in the timer unit) if it does.
+4. New work starts a new OpenSpec change; `fleet-tracer-bullet` is archived.
 
 Standing rules:
 
-- Read `CLAUDE.md`, then `openspec/changes/fleet-tracer-bullet/{design,tasks}.md` and the five `specs/*/spec.md`, before coding.
+- Read `CLAUDE.md`, then the five `openspec/specs/*/spec.md`, before coding. The archived change (`openspec/changes/archive/2026-11-05-fleet-tracer-bullet/`, design and tasks) is history.
 - Keep `docs/spikes.md` current with spike results (numbers only, no hostnames).
 
 ## Maintainer decisions (DECIDED and implemented)
@@ -55,13 +56,12 @@ Standing rules:
 
 ## HUMAN-only tasks
 
-- 8.1 timers across sleep (macOS and Linux), see below.
-- 9.4 archive the change and record the verified Claude Code version (per `tasks.md`, once the tasks above are done).
-- 2.2 capture a real `waiting` row: trigger a permission prompt in a throwaway interactive session, run `claude agents --json` read-only, record the row's keys (not values) and the wall time in `docs/spikes.md`.
+- 8.1 timers across sleep (macOS and Linux), see below. PARKED until the maintainer next travels with a laptop.
+- 2.2 capture a real `waiting` row: DROPPED (maintainer, 2026-11-05); the note below is kept for the record. To redo it: trigger a permission prompt in a throwaway interactive session, run `claude agents --json` read-only, record the row's keys (not values) and the wall time in `docs/spikes.md`.
   - Attempted 2026-11-05: the maintainer's Claude Code session auto-allowed the file write, so no prompt appeared and no `waiting` row was captured.
-  - Still open, lowest value. It needs a trigger that always prompts, for example a different permission mode.
+  - Dropped as not worth doing. It would need a trigger that always prompts, for example a different permission mode.
 
-Done and removed from this list: 2.1 `CLAUDE_CONFIG_DIR` sub-check, 2.8 timing, Group 5 checkpoint, 7.2 real observation and 8.5 (all 2026-11-05), 4.5 colours and resize check, 9.3 public-readiness gate and the public flip (both 2026-11-05).
+Done and removed from this list: 9.4 archive (2026-11-05), 2.1 `CLAUDE_CONFIG_DIR` sub-check, 2.8 timing, Group 5 checkpoint, 7.2 real observation and 8.5 (all 2026-11-05), 4.5 colours and resize check, 9.3 public-readiness gate and the public flip (both 2026-11-05).
 
 ## 8.5 runbook (HUMAN, done 2026-11-05; kept for onboarding new machines)
 
@@ -89,13 +89,15 @@ d. Roll back:
    - StatusLine only: `bin/grid-fleet install --statusline --uninstall`.
    - Backups of the settings file sit next to it as `settings.json.grid-fleet-backup-<UTC time>` (for example `settings.json.grid-fleet-backup-20261104T101530Z`), in `~/.claude/` or `$CLAUDE_CONFIG_DIR/`. They are never pruned and can hold secrets: delete them once you are happy.
 
-## 8.1 sleep spike (HUMAN)
+## 8.1 sleep spike (HUMAN, PARKED)
+
+Parked by the maintainer 2026-11-05: to be run on the next laptop trip, result reported back.
 
 - macOS: load a throwaway launchd agent with a 60 s `StartInterval` that appends timestamps to a temp log, sleep the laptop for 3+ minutes, wake it, read the log for a run within one interval of wake.
 - Linux: a transient `systemd-run --user --on-unit-active=60 ...` timer, then reboot with and without linger and check that a run occurs.
 - Why: laptops sleep; the timers must fire after wake or the host goes grey `unknown` on the hub.
 
-## Known limits / follow-ups (1-16 from QA of groups 1-4, 17-25 from the README unit, 26-32 later, 33-34 from the final docs pass, 35 from the 8.5 rollout, 36 from the installer polish, 37-38 from the push-retry and tunnel incident, 39 from the idle column, 40-43 from QA of the push retry; none blocking)
+## Known limits / follow-ups (1-16 from QA of groups 1-4, 17-25 from the README unit, 26-32 later, 33-34 from the final docs pass, 35 from the 8.5 rollout, 36 from the installer polish, 37-38 from the push-retry and tunnel incident, 39 from the idle column, 40-43 from QA of the push retry; none blocking; 36-43 and similar small known issues are PARKED until they bite, kept listed for the record)
 
 1. A stored snapshot's `host` is not re-checked against config after a `host_name` rename within `interval_s`; the old `host` is delivered under the new filename (the view uses the filename, so no visible effect).
 2. FIXED (S5): the hub clamps a snapshot's `interval_s` to 3600 (`MAX_INTERVAL_S` in `grid_fleet/hub.py`), so a host claiming a huge interval goes stale.
@@ -105,7 +107,7 @@ d. Roll back:
 6. `tests/test_guard.py` scans `grid_fleet/` only, not `bin/grid-fleet`, and checks only `match`, `X | Y` annotations and imports.
 7. The upload completeness check catches truncation, not every short stream that ends in a newline (tool-written snapshots are one line plus a newline, so the known gap cannot occur for them).
 8. `claude` is not on the non-interactive ssh PATH on hosts that install it in `~/.local/bin`, so `sessions` is null with warning `claude agents unavailable`. BIT US ONCE at 8.5: a macOS timer installed over ssh recorded a PATH without `claude`, every tick reported `sessions: null`, and reinstalling with the directory on PATH fixed it. The installer (8.2) records the install-time PATH in the unit. An install-time warning (plan and apply) when `claude` is not on the recorded PATH has landed (`a5e3ade`). Config has no `claude` path key; only `GRID_FLEET_CLAUDE_BIN` or PATH can fix it (see follow-up 36).
-9. DONE: the tested list holds 2.1.304, 2.1.305, 2.1.311 and 2.1.318 (verified on real hosts 2026-11-05); other versions warn. The archive step (9.4) is still open.
+9. DONE: the tested list holds 2.1.304, 2.1.305, 2.1.311 and 2.1.318 (verified on real hosts 2026-11-05); other versions warn. The change is archived (9.4).
 10. DONE: all six machines are onboarded as spokes. Per-host config lives outside the repo on each machine by design; do not record host details here.
 11. DONE: security review gate (`grid-security-reviewer`): GO to flip public after the doc items, which are done.
 12. DONE: QA re-gate (`grid-qa-engineer`) after Groups 6-8: PASS.
@@ -154,7 +156,7 @@ d. Roll back:
 
 ## Future decisions: outcomes roster (v2 idea, undecided)
 
-An "outcomes roster": not a task list, a team-roster-style view of what is being built and where (outcome, repo@branch/worktree, machine, active sessions, state). Leaning: a v2 view over the same snapshots, with opt-in repo/branch fields (changes the privacy contract). Not in `fleet-tracer-bullet`.
+An "outcomes roster": not a task list, a team-roster-style view of what is being built and where (outcome, repo@branch/worktree, machine, active sessions, state). Leaning: a v2 view over the same snapshots, with opt-in repo/branch fields (changes the privacy contract). Not in the archived `fleet-tracer-bullet`.
 
 Questions to answer before specifying it:
 
