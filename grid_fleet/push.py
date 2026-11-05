@@ -107,6 +107,10 @@ UPLOAD_SCRIPT = (
 # other shell or ssh-token metacharacter (ProxyCommand-style `%h` expansion, etc.).
 # Matched with fullmatch: a `$` anchor would let a trailing "\n" through.
 _ALIAS_CHARS = re.compile(r"[A-Za-z0-9._@:-]+")
+# Longest hub value accepted. 255 is the DNS name limit (and what `user@host` realistically
+# needs); without a cap an absurdly long value would be echoed into plans, errors and the
+# ssh argv.
+HUB_MAX_LEN = 255
 
 
 class PushError(Exception):
@@ -124,6 +128,8 @@ def validate_hub(hub_value: object) -> Optional[str]:
     """
     if not isinstance(hub_value, str) or not hub_value:
         return "must be a non-empty ssh host alias or \"local\""
+    if len(hub_value) > HUB_MAX_LEN:
+        return "must be at most %d characters" % HUB_MAX_LEN
     if hub_value.startswith("-"):
         return "must not start with \"-\" (ssh would read it as an option)"
     if not _ALIAS_CHARS.fullmatch(hub_value):

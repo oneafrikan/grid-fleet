@@ -55,8 +55,14 @@ def _load(name: str):
     return importlib.import_module("grid_fleet." + COMMANDS[name][0])
 
 
+_DESCRIPTION = ("Dashboard for Claude Code sessions, token use and plan limits "
+                "across a fleet of machines.")
+
+
 def build_parser(selected: Optional[str] = None) -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="grid-fleet", description=__doc__.split("\n")[0])
+    # User-facing text only. The module docstring is an internal ownership note and used
+    # to leak into --help when it was passed here.
+    parser = argparse.ArgumentParser(prog="grid-fleet", description=_DESCRIPTION)
     parser.add_argument("--version", action="version", version="grid-fleet " + __version__)
     sub = parser.add_subparsers(dest="command", metavar="{collect,push,view,install}")
     for name in COMMANDS:

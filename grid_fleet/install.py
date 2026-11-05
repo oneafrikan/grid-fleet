@@ -285,6 +285,41 @@ def _warnings(config_path: str, hub: Optional[str], hub_problem: Optional[str]) 
     return []
 
 
+def _is_executable_file(path: str) -> bool:
+    return os.path.isfile(path) and os.access(path, os.X_OK)
+
+
+def claude_on_path(claude_bin: str, path_env: str) -> bool:
+    """Would `claude_bin` be found when run under PATH=`path_env`?
+
+    Same lookup rule as sources_claude, which hands `claude_bin` straight to subprocess:
+    a value containing a slash is used as given; a bare name is searched in the PATH
+    directories (an empty PATH entry means the cwd to execvp, which is no place for a
+    timer to look, so it is skipped). Read-only.
+    """
+    if os.sep in claude_bin:
+        return _is_executable_file(claude_bin)
+    return any(_is_executable_file(os.path.join(d, claude_bin))
+               for d in path_env.split(os.pathsep) if d)
+
+
+def claude_warning(claude_bin: str, path_env: str) -> List[str]:
+    """Plan warning (a list, empty when fine) for a `claude` the timer's PATH cannot find.
+
+    Why this exists: a timer installed over a non-interactive ssh session got a PATH
+    without ~/.local/bin, so every tick reported `sessions: null`. The PATH is frozen
+    into the unit at install time, so the fix is a re-install with the right PATH. This
+    only warns: collect still works without `claude` (it just has no session counts).
+    """
+    if claude_on_path(claude_bin, path_env):
+        return []
+    return ["WARNING: `%s` was not found on the PATH that will be recorded in the unit (%s), "
+            "so every tick will report sessions: null. Fix: re-run with the directory "
+            "containing `claude` on PATH, e.g. `PATH=$HOME/.local/bin:$PATH grid-fleet "
+            "install --apply`, or set GRID_FLEET_CLAUDE_BIN to the executable."
+            % (claude_bin, path_env)]
+
+
 def log_hint(kind: str, log_path: str) -> str:
     """Where a failing tick (e.g. a push error) is logged; shown in the plan and after apply."""
     if kind == "launchd":
@@ -581,10 +616,17 @@ def _pick_style(data, text: str):
 
 # What a rewrite in the fallback layout can change. Shown to the user before the "y", so it
 # must list what really happens, not only the good news.
-_REWRITE_NOTE = ("note: settings.json is not in a layout grid-fleet can reproduce, so it will be "
+_REWRITE_NOTE = ("note: %s is not in a layout grid-fleet can reproduce, so it will be "
                  "rewritten as 2-space JSON. Values and key order are kept, but duplicate keys "
                  "are dropped (the last one wins), CRLF line endings become LF, and number "
                  "spellings may be normalised (e.g. 1.0e2 becomes 100.0)")
+
+
+def _rewrite_note(path: str) -> str:
+    """The note above, naming the file actually being rewritten (settings.json for the
+    statusLine edit, the grid-fleet config for the install config write). Basename only:
+    the full path is already printed by the plan."""
+    return _REWRITE_NOTE % os.path.basename(path)
 
 
 def _has_nonfinite(obj) -> bool:
@@ -619,7 +661,7 @@ def _render(data, style, exact, path: str):
     except UnicodeEncodeError:
         raise InstallError("%s contains text that cannot be written as UTF-8 (a lone surrogate "
                            "escape?); left untouched" % path)
-    return text, ("" if exact else _REWRITE_NOTE)
+    return text, ("" if exact else _rewrite_note(path))
 
 
 def _read_json_object(path: str, what: str):
@@ -1138,7 +1180,12 @@ def install_main(config, args, *, runner: Optional[Runner] = None,
                                ("--account", explicit_account, validate_account)):
         reason = check(value) if value is not None else None
         if reason is not None:
-            sys.stderr.write("grid-fleet install: invalid %s %r: %s\n" % (flag, value, reason))
+            # Python 3.9's argparse swallows a lone `--` in `--hub=--` and hands over `[]`
+            # instead of the string, so the original text is gone. Echo only a real string;
+            # otherwise say plainly the value is invalid rather than print `[]`.
+            shown = ("%s %r" % (flag, value) if isinstance(value, str)
+                     else "%s value" % flag)
+            sys.stderr.write("grid-fleet install: invalid %s: %s\n" % (shown, reason))
             return EXIT_USAGE
     try:
         kind = system_kind(platform if platform is not None else sys.platform)
@@ -1185,7 +1232,8 @@ def install_main(config, args, *, runner: Optional[Runner] = None,
 
     plan = render_plan(kind, interval_s, python, script, path_env,
                        [(s, p) for s, p, _t in entries], command_plan(kind, uid, paths),
-                       _warnings(config.config_path, hub, hub_problem), log_path,
+                       _warnings(config.config_path, hub, hub_problem)
+                       + claude_warning(cfg.claude_bin(env), path_env), log_path,
                        config_plan_lines(cfg_edit) if cfg_edit is not None else ())
     sys.stdout.write(plan)
     if not mode_change:
@@ -1224,16 +1272,30 @@ def install_main(config, args, *, runner: Optional[Runner] = None,
         return EXIT_REFUSED
     # Config BEFORE the timer: the first tick (which can fire as soon as the timer is
     # loaded) must already see the right hub and interval_s.
+    config_written = False
     try:
         if cfg_edit.changed:
             _apply_config_edit(cfg_edit)
+            config_written = True
         if not timer_current:
             _apply(kind, entries, uid, runner, config.state_dir, loaded)
     except (InstallError, OSError) as exc:
         sys.stderr.write("grid-fleet install: %s\n" % exc)
+        if config_written:
+            # The scheduler step failed after the config was already on disk: say so, or the
+            # user thinks nothing happened. Re-running is safe: the config then compares
+            # equal, and the timer files are rewritten / reloaded as needed.
+            sys.stderr.write("grid-fleet install: the config was already written (%s); "
+                             "re-running the same command is safe and repairs the timer\n"
+                             % cfg_edit.path)
         return EXIT_REFUSED
     if cfg_edit.changed:
         sys.stdout.write("config written: %s\n" % cfg_edit.path)
+    if timer_current:
+        # Config-only change: the loaded timer was left alone, so "installed" and the
+        # log/linger hints (about a timer we did not touch) would be inaccurate.
+        sys.stdout.write("config updated; timer unchanged\n")
+        return EXIT_OK
     sys.stdout.write("installed\n%s\n" % log_hint(kind, log_path))
     if kind == "systemd":
         sys.stdout.write(LINGER_NOTE + "\n")
