@@ -84,5 +84,31 @@ class TestClaudeOnPathWarning(ClaudeCase):
             os.chdir(old)
 
 
+class TestRewriteNoteNamesTheFile(ConfigCase):
+    """The layout note used to say 'settings.json' even when the file was the config."""
+
+    ODD_LAYOUT = '{"schema": 1,   "hub": "old-hub"}'  # json.dumps cannot reproduce this
+
+    def test_config_write_note_names_the_config_file(self):
+        self.write_config(text=self.ODD_LAYOUT)
+        rc, out, err = self.run_install(config=self.loaded_config(), hub="new-hub")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("note: config.json is not in a layout", out)
+        self.assertNotIn("settings.json", out)
+
+    def test_statusline_note_names_settings_json(self):
+        settings = os.path.join(self.work, "claude", "settings.json")
+        os.makedirs(os.path.dirname(settings))
+        with open(settings, "w") as fh:
+            fh.write('{"statusLine":{"command":"x"},   "k":1}')
+        edit = install.plan_statusline_install(settings, "/opt/synth/py", "/srv/synth/grid-fleet")
+        self.assertIn("note: settings.json is not in a layout", edit.note)
+        self.assertNotIn("config.json", edit.note)
+
+    def test_note_uses_the_actual_file_name(self):
+        _text, note = install._render({"a": 1}, (2, False, "\n"), False, "/x/y/other.json")
+        self.assertIn("note: other.json is not", note)
+
+
 if __name__ == "__main__":
     unittest.main()

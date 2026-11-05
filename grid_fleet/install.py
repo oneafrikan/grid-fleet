@@ -616,10 +616,17 @@ def _pick_style(data, text: str):
 
 # What a rewrite in the fallback layout can change. Shown to the user before the "y", so it
 # must list what really happens, not only the good news.
-_REWRITE_NOTE = ("note: settings.json is not in a layout grid-fleet can reproduce, so it will be "
+_REWRITE_NOTE = ("note: %s is not in a layout grid-fleet can reproduce, so it will be "
                  "rewritten as 2-space JSON. Values and key order are kept, but duplicate keys "
                  "are dropped (the last one wins), CRLF line endings become LF, and number "
                  "spellings may be normalised (e.g. 1.0e2 becomes 100.0)")
+
+
+def _rewrite_note(path: str) -> str:
+    """The note above, naming the file actually being rewritten (settings.json for the
+    statusLine edit, the grid-fleet config for the install config write). Basename only:
+    the full path is already printed by the plan."""
+    return _REWRITE_NOTE % os.path.basename(path)
 
 
 def _has_nonfinite(obj) -> bool:
@@ -654,7 +661,7 @@ def _render(data, style, exact, path: str):
     except UnicodeEncodeError:
         raise InstallError("%s contains text that cannot be written as UTF-8 (a lone surrogate "
                            "escape?); left untouched" % path)
-    return text, ("" if exact else _REWRITE_NOTE)
+    return text, ("" if exact else _rewrite_note(path))
 
 
 def _read_json_object(path: str, what: str):
