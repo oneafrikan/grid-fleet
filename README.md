@@ -2,8 +2,8 @@
 
 A btop-style terminal dashboard for your Claude Code sessions across all your machines.
 
-**Status: pre-alpha, public. Groups 1-8 are built and independently QA'd: the tracer bullet (collect, push, view), the subagent leaderboard and sparkline, the limits strip, and the timer and statusLine installers. The security review gate is GO and the public-readiness check (9.3) passed. Verified on real machines: `install --apply` and `install --statusline` (task 8.5), a fleet of six hosts reporting to one hub, a real limits capture (7.2), and the hub view in a real terminal (4.5). Still pending: the timers across sleep and reboot (8.1).**
-The plan is in [`openspec/changes/fleet-tracer-bullet/`](openspec/changes/fleet-tracer-bullet/).
+**Status: pre-alpha, public. Groups 1-8 are built and independently QA'd: the tracer bullet (collect, push, view), the subagent leaderboard and sparkline, the limits strip, and the timer and statusLine installers. The security review gate is GO and the public-readiness check (9.3) passed. Verified on real machines: `install --apply` and `install --statusline` (task 8.5), a fleet of six hosts reporting to one hub, a real limits capture (7.2), and the hub view in a real terminal (4.5). Not yet verified: the timers across sleep and reboot (8.1, parked until the maintainer next travels with a laptop).**
+The specs are in [`openspec/specs/`](openspec/specs/); the original plan is archived in [`openspec/changes/archive/2026-11-05-fleet-tracer-bullet/`](openspec/changes/archive/2026-11-05-fleet-tracer-bullet/).
 
 ## What it is
 
@@ -192,7 +192,7 @@ Limits capture:
 - `view` runs on the hub, reads the inbox and draws the dashboard with curses.
 - Limits come from the optional statusLine tap, which chains to your existing statusLine.
 
-Details: [`design.md`](openspec/changes/fleet-tracer-bullet/design.md), [`tasks.md`](openspec/changes/fleet-tracer-bullet/tasks.md).
+Details: [`design.md`](openspec/changes/archive/2026-11-05-fleet-tracer-bullet/design.md), [`tasks.md`](openspec/changes/archive/2026-11-05-fleet-tracer-bullet/tasks.md), current specs in [`openspec/specs/`](openspec/specs/).
 
 ## Claude Code versions
 
