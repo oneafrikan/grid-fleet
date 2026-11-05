@@ -5,7 +5,7 @@ Deliver each host's latest snapshot to a hub the user chooses, over plain ssh, w
 ## ADDED Requirements
 
 ### Requirement: Push over ssh
-`grid-fleet push` SHALL send the latest snapshot to the hub identified by the `hub` config value, which is an ssh host alias, by running `ssh` with the snapshot on stdin so that it appears in the hub's inbox as `<host>.json`. The hub MUST need nothing installed beyond `sshd` and a POSIX shell. A `hub` value that is empty, starts with `-`, or contains anything outside letters, digits and `. _ @ : -` (so no whitespace, control characters or shell/ssh metacharacters) MUST be rejected, so it can never be parsed as an ssh option. The alias SHALL also follow a `--` argument so ssh cannot read it as an option, and ssh SHALL run with `ClearAllForwardings=yes`.
+`grid-fleet push` SHALL send the latest snapshot to the hub identified by the `hub` config value, which is an ssh host alias, by running `ssh` with the snapshot on stdin so that it appears in the hub's inbox as `<host>.json`. The hub MUST need nothing installed beyond `sshd` and a POSIX shell. A `hub` value MUST be at most 255 characters; a longer one is rejected like the other invalid values. A `hub` value that is empty, starts with `-`, or contains anything outside letters, digits and `. _ @ : -` (so no whitespace, control characters or shell/ssh metacharacters) MUST be rejected, so it can never be parsed as an ssh option. The alias SHALL also follow a `--` argument so ssh cannot read it as an option, and ssh SHALL run with `ClearAllForwardings=yes`.
 
 #### Scenario: Successful push
 - **WHEN** push runs with `hub` set to a reachable alias

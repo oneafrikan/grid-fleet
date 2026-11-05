@@ -263,6 +263,17 @@ class TestHubNotConfigured(PushBase):
                    "fe80::1", "User_1@host-2.example", "a-", "x"):
             self.assertIsNone(push.validate_hub(ok), ok)
 
+    def test_hub_longer_than_255_characters_is_refused_with_exit_3(self):
+        # Boundary: 255 characters of a valid charset is fine, 256 is refused.
+        self.assertIsNone(push.validate_hub("a" * 255))
+        self.assertIn("255", push.validate_hub("a" * 256))
+        config = dataclasses.replace(self.config, hub="a" * 256)
+        rc, _, err = self.run_push(config)
+        self.assertEqual(rc, 3)  # EXIT_CONFIG, like every other invalid hub value
+        self.assertIn("hub", err)
+        self.assertNotIn("a" * 256, err, "the oversized value is not echoed back")
+        self.assert_nothing_ran()
+
 
 class TestAtomicDelivery(PushBase):
     """Spec 'Atomic delivery' / 'Interrupted upload'."""
