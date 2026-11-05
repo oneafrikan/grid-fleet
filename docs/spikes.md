@@ -170,8 +170,10 @@ Stale-versus-fresh observation:
 
 - A host paused beyond 2 x its interval showed grey `unknown` and was left out of the totals
   (the observation behind the 5.1 sign-off).
-- Consequence for limits: at 47f418f the hub builds the limits strip from fresh hosts only. The
-  maintainer has decided to include stale hosts' limits; that change is in progress.
+- Consequence for limits: at 47f418f the hub built the limits strip from fresh hosts only. The
+  maintainer decided to include stale hosts' limits; that change is merged (the strip now shows the
+  newest capture per window per account, with its age). Totals, leaderboard and sparkline still
+  exclude stale hosts.
 
 ## U7 / Group 7 spikes
 

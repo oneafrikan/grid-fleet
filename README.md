@@ -12,7 +12,7 @@ Running Claude Code on several machines gives no single view of the fleet. grid-
 - Sessions running on each machine, split busy / waiting.
 - Token usage: output tokens as the headline, input and cache tokens as a muted second line.
 - Which subagent types do the work over the last 7 days (the main session counts as an agent).
-- Your Max-plan 5-hour and 7-day limits, shown once per account.
+- Your Max-plan 5-hour and 7-day limits, shown once per account, with the age of the capture.
 
 A host that has not reported recently shows as grey `unknown`, never as zero. It shows "now" only: no history is stored in v1.
 
@@ -39,7 +39,7 @@ Synthetic example (80x24, invented host names and numbers):
 └──────────────────────────────────────────────────────────────────────────────┘
 ```
 
-- `beta` is stale (its file is older than 2 x its interval) and is left out of the totals.
+- `beta` is stale (its file is older than 2 x its interval) and is left out of the totals, the leaderboard and the sparkline. Its limits are still used: the limits strip shows the newest capture per window per account, whichever host made it, labelled `as of <age> ago`.
 - `gamma` is listed in `view.expected_hosts` but has never reported.
 
 ## Install
@@ -88,23 +88,23 @@ Path: `~/.config/grid-fleet/config.json` (`$XDG_CONFIG_HOME/grid-fleet/config.js
 ```
 
 - `host_name`: how this machine appears. Default is the short hostname. Characters outside `A-Za-z0-9._-` become `_`; at most 64 characters.
-- `account`: label for the Claude plan. Hosts sharing one plan use the same label. The label is yours; it is not read from Claude. The hub shortens labels to 32 ASCII characters.
+- `account`: label for the Claude plan. Hosts sharing one plan use the same label. The label is yours; it is not read from Claude. The hub shortens labels to 32 ASCII characters; `install --account` refuses anything longer or non-ASCII.
 - `hub`: an ssh host alias from the spoke's own `~/.ssh/config`, or `"local"` on the hub itself. Required for `push`; `collect` and `view` work without it.
 - `interval_s`: one of 300, 600, 900 (default 600). The hub calls a host stale after twice this.
 - `view.expected_hosts`: host names that must appear; one with no snapshot shows `unknown (never reported)`.
 - `view.refresh_s`: seconds between inbox checks (default 5).
 - `view.ascii`: force ASCII glyphs.
 - `statusline_original`: written by `install --statusline`. Do not edit it by hand.
-- `install` does not write `hub`, `account` or `interval_s`. Edit the file yourself.
+- `install --apply` writes `interval_s`, `hub` and `account` (see `grid-fleet install`). You can still edit the file by hand. Other keys are left as they are, and `--uninstall` leaves these three in place.
 
 ## Quick start
 
 ### Spoke (any machine that runs Claude Code)
 
-1. Install (above) and write the config with the hub's ssh alias.
-2. `grid-fleet collect` writes a snapshot and prints a one-line summary.
-3. `grid-fleet push` sends it to the hub.
-4. `grid-fleet install` prints the timer plan; `grid-fleet install --apply` installs it (see below).
+1. Install (above).
+2. `grid-fleet install --hub <hub-alias> --interval 600` prints the plan: the config keys it would write and the timer files it would create. It changes nothing.
+3. Read the plan, then run the same command with `--apply` and answer `y`. It writes the config, then installs the timer.
+4. Optional check by hand: `grid-fleet collect` writes a snapshot and prints a one-line summary; `grid-fleet push` sends it to the hub.
 5. Optional: `grid-fleet install --statusline` to capture Max-plan limits.
 
 - The alias must work without a prompt: `push` runs `ssh` with `BatchMode=yes` and `ConnectTimeout=10`. Use a key that needs no passphrase prompt (agent or unprotected key).
@@ -128,12 +128,21 @@ Path: `~/.config/grid-fleet/config.json` (`$XDG_CONFIG_HOME/grid-fleet/config.js
 ## `grid-fleet install`
 
 ```
-grid-fleet install [--interval 300|600|900] [--apply] [--statusline] [--uninstall]
+grid-fleet install [--hub ALIAS] [--account LABEL] [--interval 300|600|900] [--apply] [--statusline] [--uninstall]
 ```
 
-- Default: prints the plan (files, commands, interpreter, script, install-time `PATH`, log location) and changes nothing.
-- `--interval`: timer interval. 120 and other values are rejected. A value that differs from `interval_s` in the config prints a warning; install does not edit the config.
+- Default: prints the plan (config changes, files, commands, interpreter, script, install-time `PATH`, log location) and changes nothing.
+- `--hub ALIAS`: the hub's ssh host alias, or `local`. Written to the config as `hub`. Without it, the `hub` already in the config is used.
+- `--account LABEL`: the account label (printable ASCII, at most 32 characters). Written as `account`. Without it, the config's `account` is used, else `default`.
+- `--interval`: timer interval, written as `interval_s`. Without it, the config's `interval_s` is used, else 600. 120 and other values are rejected.
+- `--hub` and `--account` are rejected (exit 2) with `--statusline` or `--uninstall`. `--interval` is rejected with `--statusline`.
+- The plan has a `config:` block listing the before and after of `interval_s`, `hub` and `account`, and `all other config keys: unchanged`.
+  - Without a usable hub the plan prints a warning and no `config:` block.
 - `--apply`: needs a TTY and a `y` at the prompt. With no TTY it prints the plan, exits non-zero and changes nothing. A second run with the same inputs reports `nothing to change`.
+  - With no hub known (neither `--hub` nor a stored `hub`) it exits 1 and changes nothing, before the prompt: a timer with no hub would fail every push.
+  - Writes the config first, then installs the timer, so the first tick sees the right hub and interval.
+  - The config write is atomic and keeps every other key. A new config file is created with `schema`, `host_name`, and the three keys (mode 0600); a config directory it has to create is mode 0700. `host_name` is added only when the file is created.
+  - A config with invalid JSON, a non-object top level or an unknown `schema` is left untouched and install exits 1, plan mode included.
   - macOS: a user LaunchAgent, `~/Library/LaunchAgents/io.grid-fleet.timer.plist`.
   - Linux: a user systemd `grid-fleet.service` and `grid-fleet.timer` under `~/.config/systemd/user/`.
   - Each tick runs `collect` then `push`, with absolute interpreter and script paths and the `PATH` captured at install time.
@@ -146,7 +155,7 @@ grid-fleet install [--interval 300|600|900] [--apply] [--statusline] [--uninstal
   - Saves the original command in the grid-fleet config as `statusline_original`.
   - With no statusLine configured, it shows a tap with no original command and still asks.
   - It is the only code path that writes `settings.json`. No other command touches it.
-- `--uninstall`: unloads and removes the timer files grid-fleet created and restores `statusLine.command` from `statusline_original`. TTY and `y` required.
+- `--uninstall`: unloads and removes the timer files grid-fleet created and restores `statusLine.command` from `statusline_original`. TTY and `y` required. It leaves `interval_s`, `hub` and `account` in the config.
 - `--statusline --uninstall`: restores only the statusLine.
 - Exit codes: 0 ok or plan printed, 1 refused or failed, 2 bad usage (such as an invalid interval).
 
