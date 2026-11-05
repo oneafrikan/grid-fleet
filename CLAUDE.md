@@ -4,7 +4,7 @@
 
 `grid-fleet`: terminal dashboard (Python, stdlib only) for Claude Code sessions, tokens,
 subagent usage and Max-plan limits across a fleet of machines.
-Status: spec approved (`openspec/changes/fleet-tracer-bullet/`). Groups 1-8 built and independently QA'd (tracer bullet, leaderboard and sparkline, limits strip, installers); security gate GO. Group 5 is signed off. `install --apply` also writes `interval_s`, `hub` and `account` to the config (QA of that write in progress). 9.1 (README) is done. Pending HUMAN checkpoints: 2.2, 4.5, 7.2, 8.1, 8.5. Pending gates: 9.2 (the-grid pointer), 9.3 (public-readiness), 9.4 (archive). Runbooks for 8.1 and 8.5 are in `TODO.md`.
+Status: spec approved (`openspec/changes/fleet-tracer-bullet/`). Groups 1-8 built, QA'd and verified on real machines (tracer bullet, leaderboard and sparkline, limits strip, installers; 7.2 and 8.5 done 2026-11-05, six hosts fresh); security gate GO. Group 5 is signed off. `install --apply` also writes `interval_s`, `hub` and `account` to the config (QA of that write in progress). 9.1 (README) is done. Pending HUMAN checkpoints: 8.1 (sleep spike), 4.5 (colours and resize), 2.2 (a real `waiting` row). Pending gates: 9.2 (the-grid pointer), 9.3 (public-readiness), 9.4 (archive). The 8.1 and 8.5 runbooks are in `TODO.md`.
 
 ## Hard constraints
 
