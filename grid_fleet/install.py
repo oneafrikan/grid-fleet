@@ -285,6 +285,41 @@ def _warnings(config_path: str, hub: Optional[str], hub_problem: Optional[str]) 
     return []
 
 
+def _is_executable_file(path: str) -> bool:
+    return os.path.isfile(path) and os.access(path, os.X_OK)
+
+
+def claude_on_path(claude_bin: str, path_env: str) -> bool:
+    """Would `claude_bin` be found when run under PATH=`path_env`?
+
+    Same lookup rule as sources_claude, which hands `claude_bin` straight to subprocess:
+    a value containing a slash is used as given; a bare name is searched in the PATH
+    directories (an empty PATH entry means the cwd to execvp, which is no place for a
+    timer to look, so it is skipped). Read-only.
+    """
+    if os.sep in claude_bin:
+        return _is_executable_file(claude_bin)
+    return any(_is_executable_file(os.path.join(d, claude_bin))
+               for d in path_env.split(os.pathsep) if d)
+
+
+def claude_warning(claude_bin: str, path_env: str) -> List[str]:
+    """Plan warning (a list, empty when fine) for a `claude` the timer's PATH cannot find.
+
+    Why this exists: a timer installed over a non-interactive ssh session got a PATH
+    without ~/.local/bin, so every tick reported `sessions: null`. The PATH is frozen
+    into the unit at install time, so the fix is a re-install with the right PATH. This
+    only warns: collect still works without `claude` (it just has no session counts).
+    """
+    if claude_on_path(claude_bin, path_env):
+        return []
+    return ["WARNING: `%s` was not found on the PATH that will be recorded in the unit (%s), "
+            "so every tick will report sessions: null. Fix: re-run with the directory "
+            "containing `claude` on PATH, e.g. `PATH=$HOME/.local/bin:$PATH grid-fleet "
+            "install --apply`, or set GRID_FLEET_CLAUDE_BIN to the executable."
+            % (claude_bin, path_env)]
+
+
 def log_hint(kind: str, log_path: str) -> str:
     """Where a failing tick (e.g. a push error) is logged; shown in the plan and after apply."""
     if kind == "launchd":
@@ -1185,7 +1220,8 @@ def install_main(config, args, *, runner: Optional[Runner] = None,
 
     plan = render_plan(kind, interval_s, python, script, path_env,
                        [(s, p) for s, p, _t in entries], command_plan(kind, uid, paths),
-                       _warnings(config.config_path, hub, hub_problem), log_path,
+                       _warnings(config.config_path, hub, hub_problem)
+                       + claude_warning(cfg.claude_bin(env), path_env), log_path,
                        config_plan_lines(cfg_edit) if cfg_edit is not None else ())
     sys.stdout.write(plan)
     if not mode_change:
