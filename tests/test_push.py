@@ -57,6 +57,11 @@ class PushBase(unittest.TestCase):
         self.addCleanup(patcher.stop)
         # Belt and braces: the ssh a push would run must be the fake, never a real one.
         self.assertEqual(shutil.which("ssh"), os.path.join(self.ssh.bin_dir, "ssh"))
+        # Retry waits are never real: every wait push asks for lands here instead.
+        self.sleeps = []
+        patcher = mock.patch.object(push, "_sleep", self.sleeps.append)
+        patcher.start()
+        self.addCleanup(patcher.stop)
         self.config = self.make_config({"hub": ALIAS})
 
     # -- helpers -----------------------------------------------------------
@@ -153,7 +158,7 @@ class TestPushOverSsh(PushBase):
         self.assertEqual(self.local_snapshot(), data)  # local snapshot kept
         self.assertEqual(len(err.strip().splitlines()), 1, err)  # one-line reason
         self.assertIn("255", err)
-        self.assertEqual(len(self.ssh.calls()), 1)  # no retry loop
+        self.assertEqual(len(self.ssh.calls()), 3)  # bounded retry: 3 attempts, not a loop
         self.assertEqual(self.ssh.inbox_files(), [])
         self.assertEqual(out, "")
 
@@ -162,7 +167,8 @@ class TestPushOverSsh(PushBase):
         self.ssh.set_mode("fail", code=255)
         _, out, err = self.run_push()
         # Exactly this shape: nothing from ssh's own output follows the exit code.
-        self.assertEqual(err, "grid-fleet push: push failed (ssh exit 255); local snapshot kept\n")
+        self.assertEqual(
+            err, "grid-fleet push: push failed (ssh exit 255) after 3 attempts; local snapshot kept\n")
         self.assertEqual(out, "")
 
     def test_ssh_stderr_never_reaches_push_output(self):
@@ -177,7 +183,9 @@ class TestPushOverSsh(PushBase):
             self.assertNotIn("hub-alias", text)
             self.assertNotIn("synthetic failure", text)
             self.assertNotIn("could not reach", text)
-        # Same through the real CLI in a child process (what a timer would log).
+        # Same through the real CLI in a child process (what a timer would log). Exit 1 is a
+        # remote failure, not a transport one: not retried, so the child never really sleeps.
+        self.ssh.set_mode("fail", code=1)
         env = dict(os.environ)
         env.update(self.config_env({"hub": ALIAS}))
         r = subprocess.run([sys.executable, BIN, "push"], capture_output=True, text=True, env=env)
@@ -199,7 +207,8 @@ class TestPushOverSsh(PushBase):
         self.ssh.set_mode("hang")
         # 3 s, not 1: under load the fake ssh script can need >1 s just to start and record its
         # argv, which made `calls()` empty and the test flaky.
-        with mock.patch.object(push, "SSH_TIMEOUT_S", 3):
+        # Retries off: this test is about the backstop itself, and a real hang x3 is slow.
+        with mock.patch.object(push, "SSH_TIMEOUT_S", 3), mock.patch.object(push, "SSH_RETRY_WAITS_S", ()):
             rc, _, err = self.run_push()
         self.assertNotEqual(rc, 0)
         self.assertIn("timeout", err)
@@ -226,6 +235,177 @@ class TestPushOverSsh(PushBase):
         r = subprocess.run([sys.executable, BIN, "push"], capture_output=True, text=True, env=env)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(self.ssh.read_inbox("alpha"), data)
+
+
+class TestSshRetry(PushBase):
+    """A transient ssh TRANSPORT failure (exit 255 or the timeout backstop) is retried within one
+    tick: up to 3 attempts, waiting 5 s then 15 s. Nothing else is retried. The sleep is
+    injected (PushBase.sleeps), so no test waits.
+    """
+
+    def run_push_recording_input(self, config=None):
+        """run_push, also returning the stdin bytes of every ssh run (real subprocess.run wrapped)."""
+        real_run = subprocess.run
+        inputs = []
+
+        def spy(argv, **kwargs):
+            inputs.append(kwargs.get("input"))
+            return real_run(argv, **kwargs)
+
+        with mock.patch.object(push.subprocess, "run", spy):
+            rc, out, err = self.run_push(config)
+        return rc, out, err, inputs
+
+    def test_first_try_success_does_not_sleep(self):
+        data = self.store_snapshot()
+        rc, out, err = self.run_push()
+        self.assertEqual((rc, err), (0, ""))
+        self.assertEqual(out, "push: delivered (ssh)\n")  # plain success line unchanged
+        self.assertEqual(self.sleeps, [])
+        self.assertEqual(len(self.ssh.calls()), 1)
+        self.assertEqual(self.ssh.read_inbox("alpha"), data)
+
+    def test_255_then_success_retries_once_with_the_same_bytes(self):
+        data = self.store_snapshot()
+        self.ssh.set_sequence(["fail", "ok"], code=255)
+        rc, out, err, inputs = self.run_push_recording_input()
+        self.assertEqual((rc, err), (0, ""))
+        self.assertEqual(out, "push: delivered (ssh, attempt 2 of 3)\n")  # ONE line
+        self.assertEqual(self.sleeps, [5])
+        self.assertEqual(len(self.ssh.calls()), 2)
+        self.assertEqual(inputs, [data, data])  # same snapshot bytes both times
+        self.assertEqual(self.ssh.read_inbox("alpha"), data)  # final hub file valid
+        self.assertEqual(self.ssh.inbox_files(), ["alpha.json"])
+
+    def test_two_failures_then_success_waits_5_then_15(self):
+        self.store_snapshot()
+        self.ssh.set_sequence(["fail", "fail", "ok"], code=255)
+        rc, out, _ = self.run_push()
+        self.assertEqual(rc, 0)
+        self.assertEqual(out, "push: delivered (ssh, attempt 3 of 3)\n")
+        self.assertEqual(self.sleeps, [5, 15])
+
+    def test_255_three_times_fails_with_one_line_and_keeps_snapshot(self):
+        data = self.store_snapshot()
+        self.ssh.set_mode("fail", code=255)
+        rc, out, err = self.run_push()
+        self.assertEqual(rc, push.EXIT_FAILED)  # exit code unchanged
+        self.assertEqual(
+            err, "grid-fleet push: push failed (ssh exit 255) after 3 attempts; local snapshot kept\n")
+        self.assertEqual(out, "")
+        self.assertEqual(self.sleeps, [5, 15])  # no wait after the last attempt
+        self.assertEqual(len(self.ssh.calls()), 3)  # and no fourth
+        self.assertEqual(self.local_snapshot(), data)
+        self.assertEqual(self.ssh.inbox_files(), [])
+        self.assertNotIn("hub-alias", err)  # still no hub name in the line
+
+    def test_timeout_then_success(self):
+        data = self.store_snapshot()
+        real_run = subprocess.run
+        runs = []
+
+        def first_run_times_out(argv, **kwargs):
+            runs.append(kwargs["input"])
+            if len(runs) == 1:
+                raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
+            return real_run(argv, **kwargs)
+
+        with mock.patch.object(push.subprocess, "run", first_run_times_out):
+            rc, out, err = self.run_push()
+        self.assertEqual((rc, err), (0, ""))
+        self.assertEqual(out, "push: delivered (ssh, attempt 2 of 3)\n")
+        self.assertEqual(self.sleeps, [5])
+        self.assertEqual(runs, [data, data])
+        self.assertEqual(self.ssh.read_inbox("alpha"), data)
+
+    def test_timeout_three_times_fails_with_one_line(self):
+        data = self.store_snapshot()
+
+        def always_times_out(argv, **kwargs):
+            raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
+
+        with mock.patch.object(push.subprocess, "run", always_times_out):
+            rc, out, err = self.run_push()
+        self.assertEqual(rc, push.EXIT_FAILED)
+        self.assertEqual(err, "grid-fleet push: push failed (timeout after %ds) after 3 attempts; "
+                              "local snapshot kept\n" % push.SSH_TIMEOUT_S)
+        self.assertEqual(self.sleeps, [5, 15])
+        self.assertEqual(self.local_snapshot(), data)
+
+    def test_remote_script_failure_is_not_retried(self):
+        # Any exit other than 255 means the remote side ran and said no (or ssh refused the
+        # request): retrying the same bytes cannot help.
+        self.store_snapshot()
+        for code in (1, 7, 127):
+            self.sleeps[:] = []
+            self.ssh.set_mode("fail", code=code)
+            before = len(self.ssh.calls())
+            rc, _, err = self.run_push()
+            self.assertEqual(rc, push.EXIT_FAILED, code)
+            self.assertEqual(len(self.ssh.calls()) - before, 1, code)  # exactly one attempt
+            self.assertEqual(self.sleeps, [], code)
+            self.assertEqual(err, "grid-fleet push: push failed (ssh exit %d); local snapshot kept\n" % code)
+
+    def test_real_truncation_guard_rejection_is_not_retried(self):
+        # The real upload script refuses a stream with no final newline and exits non-zero;
+        # the fake ssh passes that status through. Not a transport failure: one attempt.
+        with self.assertRaises(push.PushError) as ctx:
+            push.deliver_ssh(self.config, b'{"schema":1')
+        self.assertEqual(len(self.ssh.calls()), 1)
+        self.assertEqual(self.sleeps, [])
+        self.assertNotIn("attempts", str(ctx.exception))
+        self.assertIsNone(self.ssh.read_inbox("alpha"))
+
+    def test_cannot_run_ssh_is_not_retried(self):
+        self.store_snapshot()
+        empty = os.path.join(self.work, "empty-path")
+        os.makedirs(empty)
+        with mock.patch.dict(os.environ, {"PATH": empty}):
+            rc, _, err = self.run_push()
+        self.assertNotEqual(rc, 0)
+        self.assertIn("cannot run ssh", err)
+        self.assertEqual(self.sleeps, [])
+
+    def test_hostile_hub_never_reaches_ssh_and_never_retries(self):
+        for bad in ("-oProxyCommand=touch /nope", "a b", "a;b"):
+            config = dataclasses.replace(self.config, hub=bad)
+            rc, _, _ = self.run_push(config)
+            self.assertEqual(rc, 3, repr(bad))  # EXIT_CONFIG
+        self.assertEqual(self.ssh.calls(), [])
+        self.assertEqual(self.sleeps, [])
+
+    def test_local_hub_never_retries(self):
+        self.store_snapshot()
+        self.ssh.set_mode("fail", code=255)  # would be retried if ssh were involved
+        config = dataclasses.replace(self.config, hub="local")
+        rc, out, _ = self.run_push(config)
+        self.assertEqual(rc, 0)
+        self.assertEqual(out, "push: delivered (local)\n")
+        self.assertEqual(self.ssh.calls(), [])
+        self.assertEqual(self.sleeps, [])
+        # A local write failure is not retried either.
+        with mock.patch("grid_fleet.push.os.replace", side_effect=OSError(5, "synthetic")):
+            rc, _, _ = self.run_push(config)
+        self.assertNotEqual(rc, 0)
+        self.assertEqual(self.sleeps, [])
+
+    def test_mid_stream_failure_then_clean_attempt_leaves_a_complete_hub_file(self):
+        # Attempt 1: the connection drops after 10 bytes (remote sees a short stream, the
+        # completeness check refuses to rename, exit 255). Attempt 2 delivers cleanly.
+        data = self.store_snapshot()
+        self.seed_hub("alpha", b'{"schema":1,"previous":"good file"}\n')
+        self.ssh.set_sequence(["die", "ok"], after=10)
+        rc, out, _ = self.run_push()
+        self.assertEqual(rc, 0)
+        self.assertEqual(out, "push: delivered (ssh, attempt 2 of 3)\n")
+        self.assertEqual(self.sleeps, [5])
+        self.assertEqual(self.ssh.read_inbox("alpha"), data)  # complete, not the 10-byte stub
+        self.assertEqual(self.ssh.inbox_files(), ["alpha.json"])  # no stray tmp from attempt 1
+
+    def test_worst_case_is_bounded(self):
+        # 3 x SSH_TIMEOUT_S backstop + 5 + 15 waits, as documented in push.py.
+        self.assertEqual(push.SSH_RETRY_WAITS_S, (5, 15))
+        self.assertEqual(3 * push.SSH_TIMEOUT_S + sum(push.SSH_RETRY_WAITS_S), 200)
 
 
 class TestHubNotConfigured(PushBase):
@@ -279,6 +459,14 @@ class TestAtomicDelivery(PushBase):
     """Spec 'Atomic delivery' / 'Interrupted upload'."""
 
     OLD = b'{"schema":1,"previous":"good file"}\n'
+
+    def setUp(self):
+        super().setUp()
+        # These tests inspect the hub after ONE failed upload; the retry loop has its own
+        # tests (TestSshRetry), so switch it off here.
+        patcher = mock.patch.object(push, "SSH_RETRY_WAITS_S", ())
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def test_hub_dying_mid_transfer_leaves_previous_file(self):
         # The remote command is killed while its `cat` is still reading: it never reaches `mv`.
