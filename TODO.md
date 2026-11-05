@@ -25,7 +25,7 @@ Status at `2cc9a52` on `main`. The repo is public. Suite at that commit: 735 tes
 - [x] Push retry merged (`2cc9a52`): `push` retries transient ssh transport failures within one tick (up to 3 attempts, 5 s then 15 s apart; only ssh exit 255 or the 60 s backstop timeout; see README). Independent QA of the retry is in progress.
 - [x] Hub tunnel fixed 2026-11-05 (maintainer, on the hub: `protocol: http2` in the tunnel config, then a service restart). About 1 in 4 spoke connections had been failing; afterwards 12 of 12 test connections succeeded and all six hosts were fresh. Infrastructure, not a grid-fleet bug; record in `docs/spikes.md`.
 - [ ] HUMAN checkpoints pending: 8.1 (timers across sleep and reboot), 2.2 (a real `waiting` row; attempted 2026-11-05, see below)
-- [ ] Gates pending: QA of the push retry (in progress); 9.4 (archive; record Claude Code 2.1.318)
+- [ ] Gates pending: QA of the push retry (in progress); 9.4 (archive; the tested list already holds 2.1.304, 2.1.305, 2.1.311 and 2.1.318)
 
 ## How to run it
 
@@ -40,7 +40,7 @@ Status at `2cc9a52` on `main`. The repo is public. Suite at that commit: 735 tes
 1. Land the independent QA verdict on the push retry (in progress), then act on any findings.
 2. HUMAN: 8.1 timers across sleep and reboot (runbook below; waiting for the maintainer).
 3. HUMAN, lowest value: 2.2 a real `waiting` row, with a trigger that always prompts.
-4. 9.4: archive the change and record the verified Claude Code version (2.1.318 was observed on the laptop; the tested list holds 2.1.305).
+4. 9.4: archive the change (the verified Claude Code versions are already in the tested list: 2.1.304, 2.1.305, 2.1.311 and 2.1.318).
 5. Decide follow-up 36 (`GRID_FLEET_CLAUDE_BIN` is not recorded in the timer unit).
 
 Standing rules:
@@ -95,7 +95,7 @@ d. Roll back:
 - Linux: a transient `systemd-run --user --on-unit-active=60 ...` timer, then reboot with and without linger and check that a run occurs.
 - Why: laptops sleep; the timers must fire after wake or the host goes grey `unknown` on the hub.
 
-## Known limits / follow-ups (1-16 from QA of groups 1-4, 17-25 from the README unit, 26-32 later, 33-34 from the final docs pass, 35 from the 8.5 rollout, 36 from the installer polish, 37-38 from the push-retry and tunnel incident; none blocking)
+## Known limits / follow-ups (1-16 from QA of groups 1-4, 17-25 from the README unit, 26-32 later, 33-34 from the final docs pass, 35 from the 8.5 rollout, 36 from the installer polish, 37-38 from the push-retry and tunnel incident, 39 from the idle column, 40-43 from QA of the push retry; none blocking)
 
 1. A stored snapshot's `host` is not re-checked against config after a `host_name` rename within `interval_s`; the old `host` is delivered under the new filename (the view uses the filename, so no visible effect).
 2. FIXED (S5): the hub clamps a snapshot's `interval_s` to 3600 (`MAX_INTERVAL_S` in `grid_fleet/hub.py`), so a host claiming a huge interval goes stale.
@@ -105,7 +105,7 @@ d. Roll back:
 6. `tests/test_guard.py` scans `grid_fleet/` only, not `bin/grid-fleet`, and checks only `match`, `X | Y` annotations and imports.
 7. The upload completeness check catches truncation, not every short stream that ends in a newline (tool-written snapshots are one line plus a newline, so the known gap cannot occur for them).
 8. `claude` is not on the non-interactive ssh PATH on hosts that install it in `~/.local/bin`, so `sessions` is null with warning `claude agents unavailable`. BIT US ONCE at 8.5: a macOS timer installed over ssh recorded a PATH without `claude`, every tick reported `sessions: null`, and reinstalling with the directory on PATH fixed it. The installer (8.2) records the install-time PATH in the unit. An install-time warning (plan and apply) when `claude` is not on the recorded PATH has landed (`a5e3ade`). Config has no `claude` path key; only `GRID_FLEET_CLAUDE_BIN` or PATH can fix it (see follow-up 36).
-9. Add the verified Claude Code version to the tested list at 9.4 (the list holds 2.1.305; 2.1.318 was observed on the reference laptop; other versions warn).
+9. DONE: the tested list holds 2.1.304, 2.1.305, 2.1.311 and 2.1.318 (verified on real hosts 2026-11-05); other versions warn. The archive step (9.4) is still open.
 10. DONE: all six machines are onboarded as spokes. Per-host config lives outside the repo on each machine by design; do not record host details here.
 11. DONE: security review gate (`grid-security-reviewer`): GO to flip public after the doc items, which are done.
 12. DONE: QA re-gate (`grid-qa-engineer`) after Groups 6-8: PASS.
@@ -140,7 +140,12 @@ d. Roll back:
 36. `GRID_FLEET_CLAUDE_BIN` is honoured by the install-time `claude` warning but is NOT recorded in the timer unit (only `PATH` is). A user who relies on that variable gets no warning, yet their ticks will not see it. Fix options: record it in the unit, or add a `claude_bin` config key. Found by the installer polish agent.
 
 37. Idea, not decided: surface "push failing" to the person watching. Today a host that fails every push just ages to grey `unknown` on the hub, with the reason only in its local timer log. Options: record the last push result in the snapshot (the hub only sees snapshots that arrived, so a failing host cannot report its own failure; this would show the previous failure on the next success), or a hub-side hint when a host is stale for longer than expected. Motivated by the tunnel incident (`docs/spikes.md`).
-38. Describe only (QA of the push retry is checking this): with retries, the push part of one tick can take up to 200 s (3 x 60 s backstop + 5 s + 15 s). That is under the shortest interval `install` accepts (300 s). `push.py` has no lock or overlap guard of its own; whether launchd and systemd already refuse to start a tick while the previous one runs was not checked here. Act on QA's finding, not on this note.
+38. Describe only (QA of the push retry is checking this): with retries, the push part of one tick can take up to 200 s (3 x 60 s backstop + 5 s + 15 s). That is under the shortest interval `install` accepts (300 s). `push.py` has no lock or overlap guard of its own; whether launchd and systemd already refuse to start a tick while the previous one runs was not checked here. Act on QA's finding, not on this note. See follow-up 43.
+39. The idle column is dropped at <63 cols; no other column-dropping rule exists.
+40. Ctrl-C during a push retry wait prints a traceback (found by QA of the push retry).
+41. A permanent ssh error (for example a bad alias) is now retried, so it costs about 20 s per tick (the 5 s and 15 s waits).
+42. Push-retry test gaps from QA: m17 and m35 are uncovered, and the worst-case-duration test is tautological.
+43. Unverified: the systemd overlap behaviour, that is, what happens when a tick is still running when the next one fires (extends follow-up 38).
 
 ## Remote
 
