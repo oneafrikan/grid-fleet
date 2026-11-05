@@ -35,7 +35,7 @@ On macOS, install SHALL create a launchd user agent; on Linux, a systemd user se
 - **THEN** install prints a note that `loginctl enable-linger` is needed for the timer to run while logged out, and does not run it
 
 ### Requirement: Config written by install
-`install` SHALL accept `--hub ALIAS|local`, `--account LABEL` and `--interval 300|600|900`, and `install --apply` SHALL write `interval_s`, `hub` and `account` into the grid-fleet config so the timer interval and the staleness interval cannot disagree. A flag SHALL win over the stored value; an omitted flag SHALL keep the stored value, else the default (`interval_s` 600, `account` `"default"`). `--hub` SHALL be checked with the same validator `push` uses (the reserved value `local` is accepted) and `--account` SHALL be a non-empty printable-ASCII label of at most 32 characters without leading or trailing whitespace. The plan SHALL show the before and after of just these three keys and change nothing. The write SHALL be atomic (temp file then rename), SHALL preserve every other key, unknown keys, key order and file layout, SHALL create a missing file as mode 0600 with `schema`, `host_name` (derived as `collect` derives it) and the three keys and a missing config directory as mode 0700, and SHALL never change the mode of an existing directory. The config SHALL be written before the timer is loaded, so the first tick sees the right hub. `--statusline` and `--uninstall` SHALL NOT write these keys and SHALL reject `--hub` and `--account`.
+`install` SHALL accept `--hub ALIAS|local`, `--account LABEL` and `--interval 300|600|900`, and `install --apply` SHALL write `interval_s`, `hub` and `account` into the grid-fleet config so the timer interval and the staleness interval cannot disagree. A flag SHALL win over the stored value; an omitted flag SHALL keep the stored value, else the default (`interval_s` 600, `account` `"default"`). `--hub` SHALL be checked with the same validator `push` uses (the reserved value `local` is accepted) and `--account` SHALL be a non-empty printable-ASCII label of at most 32 characters without leading or trailing whitespace. The plan SHALL show the before and after of just these three keys and change nothing. The write SHALL be atomic (temp file then rename), SHALL preserve every other key, unknown keys and key order, and the file layout when it is one `json.dumps` can reproduce byte-for-byte (otherwise the file is normalised to 2-space JSON and the plan shows a note about it before the confirmation), SHALL create a missing file as mode 0600 with `schema`, `host_name` (derived as `collect` derives it) and the three keys and a missing config directory as mode 0700, and SHALL never change the mode of an existing directory. The config SHALL be written before the timer is loaded, so the first tick sees the right hub. `--statusline` and `--uninstall` SHALL NOT write these keys and SHALL reject `--hub` and `--account`.
 
 #### Scenario: Config created
 - **WHEN** `install --apply --hub H --interval 300 --account A` is confirmed and no config file exists
@@ -83,6 +83,10 @@ The generated unit SHALL use absolute paths to the Python interpreter and `grid-
 - **WHEN** the scheduler runs the unit with only its configured environment
 - **THEN** `ssh` and the interpreter are found
 
+#### Scenario: claude not on the recorded PATH
+- **WHEN** `install` (plan or apply) runs and `claude` cannot be found on the `PATH` that will be recorded in the unit, and `GRID_FLEET_CLAUDE_BIN` does not name an existing executable
+- **THEN** it prints a warning naming the fix (re-run with the directory containing `claude` on `PATH`) and still proceeds, because `collect` works without `claude` and only reports `sessions: null`
+
 ### Requirement: Idempotent and reversible
 Re-running install with the same inputs SHALL be a no-op, with different inputs SHALL update in place, and `install --uninstall` SHALL remove the timer files and restore the statusLine, and SHALL leave the config's `interval_s`, `hub` and `account` untouched (they are the user's settings, not timer state).
 
@@ -95,8 +99,9 @@ Re-running install with the same inputs SHALL be a no-op, with different inputs 
 - **THEN** the timer is unloaded and its files removed, and `statusLine.command` is restored to its saved original
 
 #### Scenario: Uninstall keeps the config keys
-- **WHEN** `install --uninstall` is confirmed after an install that wrote `hub`, `account` and `interval_s`
+- **WHEN** `install --uninstall` is confirmed after an install that wrote `hub`, `account` and `interval_s`, and no statusLine is restored
 - **THEN** the config file is byte-identical to before the uninstall
+- **AND** when a statusLine is restored, the only change to the config is that the `statusline_original` slot, if it held the restored original, becomes null
 
 ### Requirement: Confirmed statusLine change
 The statusLine tap SHALL be installed only by `install --statusline`, which SHALL print the exact before and after of `statusLine.command` in `~/.claude/settings.json`, require explicit confirmation, back up the file, preserve all other settings, write atomically, and save the original command so it can be restored.
