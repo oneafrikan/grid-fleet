@@ -111,7 +111,10 @@ Path: `~/.config/grid-fleet/config.json` (`$XDG_CONFIG_HOME/grid-fleet/config.js
 - When installing over ssh, make sure the directory containing `claude` (often `~/.local/bin`) is on `PATH` for that command: the unit records the `PATH` at install time, and without `claude` on it every tick reports `sessions` as `unknown`.
 - Linux servers that should report while you are logged out need `loginctl enable-linger $USER`. `install` prints the note and never runs it.
 - The alias must work without a prompt: `push` runs `ssh` with `BatchMode=yes` and `ConnectTimeout=10`. Use a key that needs no passphrase prompt (agent or unprotected key).
-- A failed push exits non-zero, logs a one-line reason and keeps the local snapshot. The next tick retries.
+- A transient ssh transport failure (ssh exit 255, or the 60 s backstop timeout) is retried inside the same tick: up to 3 attempts, 5 s then 15 s apart, with the same snapshot bytes each time. Worst case is 200 s per push, under the shortest interval `install` accepts (300 s).
+  - Not retried: a failure of the remote upload script (any other ssh exit status), a validation error, hub `local`.
+  - Log lines: `push: delivered (ssh)`, `push: delivered (ssh, attempt 2 of 3)`, `push failed (ssh exit 255) after 3 attempts; local snapshot kept`.
+  - A push that still fails exits non-zero and keeps the local snapshot. The next tick retries.
 
 ### Hub (the machine you watch from)
 
@@ -121,6 +124,8 @@ Path: `~/.config/grid-fleet/config.json` (`$XDG_CONFIG_HOME/grid-fleet/config.js
 
 - The ssh upload writes to `$XDG_STATE_HOME/grid-fleet/inbox` (default `~/.local/state/grid-fleet/inbox`) as seen by a non-interactive ssh shell. `view` also honours `GRID_FLEET_STATE_DIR`. Both must resolve to the same directory, so leave `GRID_FLEET_STATE_DIR` unset on the hub unless you know the ssh shell sees the same path.
 - `view` is read-only, opens no port and contacts no other machine.
+- Troubleshooting: if hosts go grey in bursts, check the hub's network first, not grid-fleet. If you reach the hub through a Cloudflare tunnel, read `cloudflared`'s log on the hub for `failed to dial to edge with quic: timeout`.
+  - Remedy: set `protocol: http2` in the tunnel's config (TCP instead of QUIC) and restart the service.
 
 ### Keys
 

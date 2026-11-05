@@ -2,7 +2,7 @@
 
 ## State
 
-Status at `8421f00` on `main`. The repo is public. Suite at that commit: 722 tests OK, 1 skipped (a version-dependent guard test, by design), on `/usr/bin/python3` 3.9.6 and Homebrew Python 3.14. Not re-run for the docs-only commits since.
+Status at `2cc9a52` on `main`. The repo is public. Suite at that commit: 735 tests OK, 1 skipped (a version-dependent guard test, by design), on `/usr/bin/python3` 3.9.6 (run 2026-11-05). The 722 count at `8421f00` was also seen on Homebrew Python 3.14; the 735 run was 3.9 only.
 
 - [x] Scaffold repo, OpenSpec init
 - [x] Change `fleet-tracer-bullet` drafted and approved (proposal, design, specs, tasks)
@@ -22,8 +22,10 @@ Status at `8421f00` on `main`. The repo is public. Suite at that commit: 722 tes
 - [x] 4.5 done 2026-11-05: the maintainer reviewed the hub view in a real terminal (6 of 6 hosts, limits strip, sparkline, leaderboard); colours and resize behaviour fine as is
 - [x] 9.3 public-readiness gate passed 2026-11-05: grep of the tracked tree and of every added line in the full git history found no machine names, hostnames, usernames, emails or home paths (benign hits only, see `tasks.md`); security review GO; repo flipped public
 - [x] 9.2 the-grid pointer (done 2026-11-05: pushed to the-grid main as 8028bb6, README `## Docs` section)
+- [x] Push retry merged (`2cc9a52`): `push` retries transient ssh transport failures within one tick (up to 3 attempts, 5 s then 15 s apart; only ssh exit 255 or the 60 s backstop timeout; see README). Independent QA of the retry is in progress.
+- [x] Hub tunnel fixed 2026-11-05 (maintainer, on the hub: `protocol: http2` in the tunnel config, then a service restart). About 1 in 4 spoke connections had been failing; afterwards 12 of 12 test connections succeeded and all six hosts were fresh. Infrastructure, not a grid-fleet bug; record in `docs/spikes.md`.
 - [ ] HUMAN checkpoints pending: 8.1 (timers across sleep and reboot), 2.2 (a real `waiting` row; attempted 2026-11-05, see below)
-- [ ] Gates pending: 9.4 (archive; record Claude Code 2.1.318)
+- [ ] Gates pending: QA of the push retry (in progress); 9.4 (archive; record Claude Code 2.1.318)
 
 ## How to run it
 
@@ -35,10 +37,11 @@ Status at `8421f00` on `main`. The repo is public. Suite at that commit: 722 tes
 
 ## Next steps (in order)
 
-1. HUMAN: 8.1 timers across sleep and reboot (runbook below).
-2. HUMAN, lowest value: 2.2 a real `waiting` row, with a trigger that always prompts.
-3. 9.4: archive the change and record the verified Claude Code version (2.1.318 was observed on the laptop; the tested list holds 2.1.305).
-4. Decide follow-up 36 (`GRID_FLEET_CLAUDE_BIN` is not recorded in the timer unit).
+1. Land the independent QA verdict on the push retry (in progress), then act on any findings.
+2. HUMAN: 8.1 timers across sleep and reboot (runbook below; waiting for the maintainer).
+3. HUMAN, lowest value: 2.2 a real `waiting` row, with a trigger that always prompts.
+4. 9.4: archive the change and record the verified Claude Code version (2.1.318 was observed on the laptop; the tested list holds 2.1.305).
+5. Decide follow-up 36 (`GRID_FLEET_CLAUDE_BIN` is not recorded in the timer unit).
 
 Standing rules:
 
@@ -92,7 +95,7 @@ d. Roll back:
 - Linux: a transient `systemd-run --user --on-unit-active=60 ...` timer, then reboot with and without linger and check that a run occurs.
 - Why: laptops sleep; the timers must fire after wake or the host goes grey `unknown` on the hub.
 
-## Known limits / follow-ups (1-16 from QA of groups 1-4, 17-25 from the README unit, 26-32 later, 33-34 from the final docs pass, 35 from the 8.5 rollout, 36 from the installer polish; none blocking)
+## Known limits / follow-ups (1-16 from QA of groups 1-4, 17-25 from the README unit, 26-32 later, 33-34 from the final docs pass, 35 from the 8.5 rollout, 36 from the installer polish, 37-38 from the push-retry and tunnel incident; none blocking)
 
 1. A stored snapshot's `host` is not re-checked against config after a `host_name` rename within `interval_s`; the old `host` is delivered under the new filename (the view uses the filename, so no visible effect).
 2. FIXED (S5): the hub clamps a snapshot's `interval_s` to 3600 (`MAX_INTERVAL_S` in `grid_fleet/hub.py`), so a host claiming a huge interval goes stale.
@@ -135,6 +138,9 @@ d. Roll back:
 35. Idea, not a decision: the view could show a per-host reason when `sessions` is null (today it shows only `unknown`), for example `claude agents unavailable` from the snapshot warning. Motivated by the 8.5 PATH incident (follow-up 8).
 
 36. `GRID_FLEET_CLAUDE_BIN` is honoured by the install-time `claude` warning but is NOT recorded in the timer unit (only `PATH` is). A user who relies on that variable gets no warning, yet their ticks will not see it. Fix options: record it in the unit, or add a `claude_bin` config key. Found by the installer polish agent.
+
+37. Idea, not decided: surface "push failing" to the person watching. Today a host that fails every push just ages to grey `unknown` on the hub, with the reason only in its local timer log. Options: record the last push result in the snapshot (the hub only sees snapshots that arrived, so a failing host cannot report its own failure; this would show the previous failure on the next success), or a hub-side hint when a host is stale for longer than expected. Motivated by the tunnel incident (`docs/spikes.md`).
+38. Describe only (QA of the push retry is checking this): with retries, the push part of one tick can take up to 200 s (3 x 60 s backstop + 5 s + 15 s). That is under the shortest interval `install` accepts (300 s). `push.py` has no lock or overlap guard of its own; whether launchd and systemd already refuse to start a tick while the previous one runs was not checked here. Act on QA's finding, not on this note.
 
 ## Remote
 
