@@ -151,5 +151,34 @@ class TestTimerFailureAfterConfigWritten(ConfigCase):
         self.assertNotIn("already written", err)
 
 
+class TestConfigOnlyChangeWording(ConfigCase):
+    def test_config_only_change_does_not_claim_the_timer_was_installed(self):
+        for kind in ("launchd", "systemd"):
+            if os.path.exists(self.cfg_path):
+                os.remove(self.cfg_path)
+            self.runner = FakeRunner()
+            self.run_install(kind, config=self.nohub, apply=True, hub="hub-alias")
+            self.runner.calls.clear()
+            rc, out, err = self.run_install(kind, config=self.loaded_config(), apply=True,
+                                            hub="other-hub")
+            self.assertEqual(rc, 0, err)
+            self.assertIn("config written", out)
+            self.assertIn("config updated; timer unchanged", out)
+            # Only what is printed AFTER the write counts (the plan above has logs/linger).
+            tail = out.split("config written")[-1]
+            self.assertNotIn("installed", tail)
+            self.assertNotIn("logs:", tail)
+            self.assertNotIn("linger", tail)
+            self.assertEqual(self.runner.mutating(), [])
+
+    def test_a_real_timer_install_still_says_installed_with_the_log_hint(self):
+        rc, out, _err = self.run_install(config=self.nohub, apply=True, hub="hub-alias")
+        tail = out.split("config written")[-1]
+        self.assertEqual(rc, 0)
+        self.assertIn("installed", tail)
+        self.assertIn("logs:", tail)
+        self.assertNotIn("timer unchanged", tail)
+
+
 if __name__ == "__main__":
     unittest.main()

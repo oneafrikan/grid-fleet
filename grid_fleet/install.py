@@ -1286,6 +1286,11 @@ def install_main(config, args, *, runner: Optional[Runner] = None,
         return EXIT_REFUSED
     if cfg_edit.changed:
         sys.stdout.write("config written: %s\n" % cfg_edit.path)
+    if timer_current:
+        # Config-only change: the loaded timer was left alone, so "installed" and the
+        # log/linger hints (about a timer we did not touch) would be inaccurate.
+        sys.stdout.write("config updated; timer unchanged\n")
+        return EXIT_OK
     sys.stdout.write("installed\n%s\n" % log_hint(kind, log_path))
     if kind == "systemd":
         sys.stdout.write(LINGER_NOTE + "\n")
