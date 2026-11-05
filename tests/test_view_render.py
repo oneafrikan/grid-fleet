@@ -299,6 +299,109 @@ class TestIdleColumn(RenderCase):
         self.assertIn("idle", self.head(self.text(width=63, height=24)))
 
 
+class TestColumnSpacing(RenderCase):
+    """Width tiers for the hosts table: compact below 100 cols, roomy 100-139, wide 140+."""
+
+    IDLE3 = {"busy": 2, "waiting": 1, "idle": 3, "other": 0, "total": 6}
+
+    def setUp(self):
+        super().setUp()
+        self.put("alpha", sessions=self.IDLE3)
+        self.put("gamma-long-host", age_s=41 * 60)
+
+    def table(self, width, height=30):
+        """(all rows, header row, stale row) at `width`; the stale host may be clipped."""
+        texts = self.text(width=width, height=height, expected=["delta"])
+        head = next(t for t in texts if t.strip("│| ").startswith("host"))
+        stale = next(t for t in texts if "stale 41m" in t)
+        return texts, head, stale
+
+    def test_compact_layout_is_unchanged_below_100_columns(self):
+        # Exact rows captured from the pre-tier renderer: the 72- and 99-col layouts must not move.
+        texts, head, _ = self.table(72)
+        self.assertEqual(head, "│ host              busy    wait    idle  out 24h   out 7d  age        │")
+        self.assertEqual(self.row(texts, "alpha"),
+                         "│ alpha                2       1       3     412k     3.1M  3m         │")
+        self.assertEqual(self.row(texts, "total"),
+                         "│ total                2       1       3     412k     3.1M             │")
+        texts, head, _ = self.table(99)
+        self.assertEqual(head, "│ host               busy    wait    idle  out 24h   out 7d  age"
+                               + " " * 34 + "│")
+        self.assertEqual(self.row(texts, "alpha"),
+                         "│ alpha                 2       1       3     412k     3.1M  3m"
+                         + " " * 35 + "│")
+
+    def test_compact_tier_at_the_idle_cutover(self):
+        self.assertEqual(self.table(63, 24)[1],
+                         "│ host     busy    wait    idle  out 24h   out 7d  age        │")
+        self.assertEqual(self.table(62, 24)[1],
+                         "│ host            busy    wait  out 24h   out 7d  age        │")
+
+    def test_tier_boundaries(self):
+        # 99 is still compact (cells 7/8, 1-space gaps); 100 is roomy; 139 roomy; 140 wide.
+        for w, count_w, tok_w, gap in ((99, 7, 8, 1), (100, 8, 10, 2), (139, 8, 10, 2),
+                                       (140, 9, 11, 3)):
+            lay = view.layout_for(w)
+            self.assertEqual((lay.count_w, lay.tok_w, len(lay.gap)), (count_w, tok_w, gap), w)
+            _, head, _ = self.table(w)
+            self.assertEqual(len(head), w, w)
+            # busy and wait headers sit exactly one pitch apart
+            self.assertEqual(head.index("wait") - head.index("busy"), count_w + gap, w)
+
+    def test_roomy_and_wide_tiers_separate_columns_by_at_least_two_spaces(self):
+        for w in (100, 120, 139, 140, 200):
+            texts, head, _ = self.table(w)
+            self.assertRegex(head, r"busy {2,}wait {2,}idle {2,}out 24h {2,}out 7d {2,}age", w)
+            for name in ("alpha", "total"):
+                self.assertRegex(self.row(texts, name), r"2 {2,}1 {2,}3 {2,}412k {2,}3\.1M", (w, name))
+
+    def test_figures_do_not_touch_in_roomy_tiers(self):
+        # A 6-char token value (`540.3k`) keeps real space before the next figure.
+        self.put("big", sessions=self.IDLE3, tokens={
+            "last_24h": tokens_window(output=540300), "last_7d": tokens_window(output=1500000)})
+        for w in (100, 120, 140):
+            texts, _, _ = self.table(w)
+            self.assertRegex(self.row(texts, "big"), r"540\.3k {4,}1\.5M", w)
+
+    def test_header_and_cells_stay_right_aligned_together(self):
+        # The last character of every numeric header sits in the same column as the last
+        # character of the figure beneath it, at every tier.
+        for w in (72, 100, 120, 140, 180):
+            texts, head, _ = self.table(w)
+            alpha = self.row(texts, "alpha")
+            for header, cell in (("busy", "2"), ("wait", "1"), ("idle", "3"),
+                                 ("out 24h", "412k"), ("out 7d", "3.1M")):
+                end = head.index(header) + len(header)
+                self.assertTrue(alpha[:end].endswith(cell), (w, header, alpha))
+                self.assertEqual(alpha[end], " ", (w, header))
+
+    def test_age_column_aligned_for_fresh_and_stale_rows(self):
+        for w in (63, 72, 99, 100, 120, 140, 200):
+            texts, head, stale = self.table(w, 24)
+            col = head.index("age")
+            self.assertEqual(self.row(texts, "alpha")[col:col + 2], "3m", w)
+            self.assertEqual(stale[col:col + 9], "stale 41m", w)
+
+    def test_box_exact_and_special_rows_fit_at_every_width(self):
+        for w in range(60, 201):
+            texts, _, _ = self.table(w, 24)
+            self.assertTrue(all(len(t) == w for t in texts), (w, [len(t) for t in texts]))
+            self.assertIn("unknown (never reported)", self.row(texts, "delta"), w)
+
+    def test_idle_column_and_full_host_name_kept_in_roomy_tiers(self):
+        for w in (100, 140):
+            texts, head, _ = self.table(w)
+            self.assertIn("idle", head)
+            self.assertIn("gamma-long-host", "\n".join(texts))  # 15-char name unclipped
+
+    def test_ascii_no_color_table_rows_match_unicode_width(self):
+        for w in (80, 120, 160):
+            plain = self.text(width=w, height=30, expected=["delta"], ascii_mode=True, color=False)
+            self.assertTrue(all(len(t) == w for t in plain), w)
+            self.assertTrue(all(ord(c) < 128 for t in plain for c in t), w)
+            self.assertRegex(next(t for t in plain if " host " in t), r"busy +wait +idle +out 24h")
+
+
 class TestFooter(RenderCase):
     def test_one_corrupt_file_footer(self):
         self.put("alpha")

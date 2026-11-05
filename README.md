@@ -39,6 +39,7 @@ Synthetic example (80x24, invented host names and numbers):
 └──────────────────────────────────────────────────────────────────────────────┘
 ```
 
+- The hosts table spaces its columns by terminal width: the compact layout above below 100 columns, wider gaps and cells from 100, and wider again from 140.
 - `beta` is stale (its file is older than 2 x its interval) and is left out of the totals, the leaderboard and the sparkline. Its limits are still used: the limits strip shows the newest capture per window per account, whichever host made it, labelled `as of <age> ago`.
 - `gamma` is listed in `view.expected_hosts` but has never reported.
 

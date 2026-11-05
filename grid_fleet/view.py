@@ -82,16 +82,46 @@ UNICODE = _Glyphs("┌", "┐", "└", "┘", "─", "│", "├", "┤", "·", 
 ASCII = _Glyphs("+", "+", "+", "+", "-", "|", "+", "+", "|", "~", "#", ".", (),
                 "+", "+", "_.,-=+*#")
 
-# Fixed column widths (characters). Counts are 7 wide so `unknown` fits in a cell.
-W_COUNT, W_TOK = 7, 8
-# busy + wait + out24 + out7 and the three single-space gaps between them.
-W_REGION = W_COUNT + 1 + W_COUNT + 1 + W_TOK + 1 + W_TOK
-# The idle column sits after wait: one more count cell plus its gap. It is the only column
-# that can be dropped (see render): at the minimum width there is no room for it.
-W_IDLE_EXTRA = 1 + W_COUNT
+# Hosts-table column geometry comes in tiers chosen by terminal width. The compact tier is
+# the original 60-column-safe layout and is kept byte-for-byte for narrow terminals; wider
+# terminals get more air so right-aligned figures (`540.3k`, `1.5M`, `0 0 1`) do not read as
+# one blob. Each tier is: count cell width, token cell width, gap between table columns,
+# gap before the age column.
+#   compact  <  100 cols: count 7, tok 8, gap 1, age gap 2  (unchanged; 7 fits `unknown`)
+#   roomy   100-139     : count 8, tok 10, gap 2, age gap 3
+#   wide     >= 140     : count 9, tok 11, gap 3, age gap 4
+# Token cells hold at most `unknown` (7) or `123.4G+` (7), so every tier keeps a blank cell
+# of padding inside the cell on top of the gap, and a value never touches its neighbour.
+# The idle column is the one column that can be dropped (see render), and only ever in the
+# compact tier: every roomy/wide width has room for it.
+class _Layout(object):
+    def __init__(self, min_width: int, count_w: int, tok_w: int, gap: int, age_gap: int):
+        self.min_width = min_width
+        self.count_w, self.tok_w = count_w, tok_w
+        self.gap = " " * gap
+        self.age_gap = " " * age_gap
+
+    def region_w(self, show_idle: bool) -> int:
+        """Width of the numeric region (busy .. out 7d), with or without the idle column."""
+        cols = 4 + (1 if show_idle else 0)  # busy, wait, [idle], out24, out7 -> cols-1 gaps
+        counts = cols - 2
+        return counts * self.count_w + 2 * self.tok_w + (cols - 1) * len(self.gap)
+
+
+# Ordered widest-first; the first tier whose min_width <= terminal width is used.
+LAYOUTS = (
+    _Layout(140, 9, 11, 3, 4),   # wide
+    _Layout(100, 8, 10, 2, 3),   # roomy
+    _Layout(0, 7, 8, 1, 2),      # compact (original)
+)
+
+
+def layout_for(width: int) -> _Layout:
+    return next(lay for lay in LAYOUTS if width >= lay.min_width)
+
+
 HOST_NAME_MIN = 5  # narrowest host-name column (also the width of the `total` label)
 W_AGE_MIN = 11  # room for "stale 2d04h"
-AGE_GAP = "  "  # a little more air before the age column
 # Lines taken by everything except host rows: top rule, HOSTS rule, column heads,
 # total row, divider, footer, bottom rule.
 FIXED_LINES = 7
@@ -229,11 +259,6 @@ def _right(text: str, width: int) -> str:
     return text.rjust(width)[:width]
 
 
-def _region_w(show_idle: bool) -> int:
-    """Width of the numeric region (busy .. out 7d), with or without the idle column."""
-    return W_REGION + (W_IDLE_EXTRA if show_idle else 0)
-
-
 def _cell(value: Optional[int], width: int, complete: bool = True, tag_if_positive: str = PLAIN,
           as_tokens: bool = False) -> Span:
     """A right-aligned numeric cell; None renders as grey `unknown`, never 0.
@@ -249,39 +274,40 @@ def _cell(value: Optional[int], width: int, complete: bool = True, tag_if_positi
 
 
 def _row(name: Span, busy: Span, wait: Span, idle: Optional[Span], out24: Span, out7: Span,
-         age: Span, hw: int, age_w: int) -> List[Span]:
+         age: Span, hw: int, age_w: int, lay: _Layout) -> List[Span]:
     """One table row. `idle` is None when the idle column is dropped for width."""
-    gap = (" ", PLAIN)
+    gap = (lay.gap, PLAIN)
     cells = [busy, gap, wait, gap] + ([idle, gap] if idle is not None else [])
     return [
         (" ", PLAIN), (name[0].ljust(hw)[:hw], name[1]), gap,
     ] + cells + [
-        out24, gap, out7, (AGE_GAP, PLAIN),
+        out24, gap, out7, (lay.age_gap, PLAIN),
         (age[0].ljust(age_w)[:age_w], age[1]),
     ]
 
 
-def _host_lines(h: hub.HostState, hw: int, age_w: int, g: _Glyphs,
+def _host_lines(h: hub.HostState, hw: int, age_w: int, g: _Glyphs, lay: _Layout,
                 show_idle: bool = True) -> List[List[Span]]:
     """One or two content rows for a host (second row is the muted in+cache line)."""
     name = (_clip(h.name, hw, g.ell), BOLD)
     if h.status == hub.NEVER:
         # No inbox file at all: say so in words, no age to show.
-        region = ("unknown (never reported)".ljust(_region_w(show_idle)), GREY)
-        return [[(" ", PLAIN), (name[0].ljust(hw), BOLD), (" ", PLAIN), region]]
+        region = ("unknown (never reported)".ljust(lay.region_w(show_idle)), GREY)
+        return [[(" ", PLAIN), (name[0].ljust(hw), BOLD), (lay.gap, PLAIN), region]]
     if h.status == hub.STALE:
-        region = ("unknown".ljust(_region_w(show_idle)), GREY)
+        region = ("unknown".ljust(lay.region_w(show_idle)), GREY)
         age = ("stale " + fmt_age(h.age_s or 0), GREY)
-        return [[(" ", PLAIN), (name[0].ljust(hw), BOLD), (" ", PLAIN), region, (AGE_GAP, PLAIN), age]]
+        return [[(" ", PLAIN), (name[0].ljust(hw), BOLD), (lay.gap, PLAIN), region,
+                 (lay.age_gap, PLAIN), age]]
     rows = [_row(
         name,
-        _cell(h.busy, W_COUNT, tag_if_positive=BUSY),
-        _cell(h.waiting, W_COUNT, tag_if_positive=WAITING),
-        _cell(h.idle, W_COUNT, tag_if_positive=DIM) if show_idle else None,
-        _cell(h.out_24h, W_TOK, as_tokens=True),
-        _cell(h.out_7d, W_TOK, as_tokens=True),
+        _cell(h.busy, lay.count_w, tag_if_positive=BUSY),
+        _cell(h.waiting, lay.count_w, tag_if_positive=WAITING),
+        _cell(h.idle, lay.count_w, tag_if_positive=DIM) if show_idle else None,
+        _cell(h.out_24h, lay.tok_w, as_tokens=True),
+        _cell(h.out_7d, lay.tok_w, as_tokens=True),
         (fmt_age(h.age_s or 0), PLAIN),
-        hw, age_w,
+        hw, age_w, lay,
     )]
     if h.cache_24h is not None or h.cache_7d is not None:
         # Muted secondary line: everything that is NOT output tokens.
@@ -291,26 +317,28 @@ def _host_lines(h: hub.HostState, hw: int, age_w: int, g: _Glyphs,
     return rows
 
 
-def _total_line(state: hub.HubState, hw: int, age_w: int, show_idle: bool = True) -> List[Span]:
+def _total_line(state: hub.HubState, hw: int, age_w: int, lay: _Layout,
+                show_idle: bool = True) -> List[Span]:
     return _row(
         ("total", BOLD),
-        _cell(state.busy.value, W_COUNT, state.busy.complete, BUSY),
-        _cell(state.waiting.value, W_COUNT, state.waiting.complete, WAITING),
-        _cell(state.idle.value, W_COUNT, state.idle.complete, DIM) if show_idle else None,
-        _cell(state.out_24h.value, W_TOK, state.out_24h.complete, as_tokens=True),
-        _cell(state.out_7d.value, W_TOK, state.out_7d.complete, as_tokens=True),
-        ("", PLAIN), hw, age_w,
+        _cell(state.busy.value, lay.count_w, state.busy.complete, BUSY),
+        _cell(state.waiting.value, lay.count_w, state.waiting.complete, WAITING),
+        _cell(state.idle.value, lay.count_w, state.idle.complete, DIM) if show_idle else None,
+        _cell(state.out_24h.value, lay.tok_w, state.out_24h.complete, as_tokens=True),
+        _cell(state.out_7d.value, lay.tok_w, state.out_7d.complete, as_tokens=True),
+        ("", PLAIN), hw, age_w, lay,
     )
 
 
-def _head_line(hw: int, age_w: int, show_idle: bool = True) -> List[Span]:
-    gap = (" ", PLAIN)
-    idle = [(_right("idle", W_COUNT), BOLD), gap] if show_idle else []
+def _head_line(hw: int, age_w: int, lay: _Layout, show_idle: bool = True) -> List[Span]:
+    gap = (lay.gap, PLAIN)
+    idle = [(_right("idle", lay.count_w), BOLD), gap] if show_idle else []
     return [
         (" ", PLAIN), ("host".ljust(hw), BOLD), gap,
-        (_right("busy", W_COUNT), BOLD), gap, (_right("wait", W_COUNT), BOLD), gap,
+        (_right("busy", lay.count_w), BOLD), gap, (_right("wait", lay.count_w), BOLD), gap,
     ] + idle + [
-        (_right("out 24h", W_TOK), BOLD), gap, (_right("out 7d", W_TOK), BOLD), (AGE_GAP, PLAIN),
+        (_right("out 24h", lay.tok_w), BOLD), gap, (_right("out 7d", lay.tok_w), BOLD),
+        (lay.age_gap, PLAIN),
         ("age".ljust(age_w), BOLD),
     ]
 
@@ -566,10 +594,14 @@ def render(state: hub.HubState, width: int, height: int, ascii_mode: bool = Fals
     # Idle column: shown only if the host-name column can still be at its minimum and the
     # age column at its minimum beside it. Otherwise it is dropped (the 60x16 floor has no
     # room), rather than squeezing names or the stale age below readability.
-    show_idle = (inner - 1 - 1 - _region_w(True) - len(AGE_GAP) - W_AGE_MIN) >= HOST_NAME_MIN
-    region = _region_w(show_idle)
-    hw = max(HOST_NAME_MIN, min(longest, 16, inner - 1 - 1 - region - len(AGE_GAP) - W_AGE_MIN))
-    age_w = inner - 1 - hw - 1 - region - len(AGE_GAP)
+    # The table geometry (cell widths and gaps) widens with the terminal; see LAYOUTS.
+    lay = layout_for(width)
+    show_idle = (inner - 1 - len(lay.gap) - lay.region_w(True) - len(lay.age_gap)
+                 - W_AGE_MIN) >= HOST_NAME_MIN
+    region = lay.region_w(show_idle)
+    hw = max(HOST_NAME_MIN, min(longest, 16, inner - 1 - len(lay.gap) - region
+                                - len(lay.age_gap) - W_AGE_MIN))
+    age_w = inner - 1 - hw - len(lay.gap) - region - len(lay.age_gap)
 
     # Limits strip first: it takes its rows off the top, hosts get what is left (at least
     # MIN_HOST_ROWS, enforced by collapsing surplus accounts into a notice).
@@ -577,7 +609,7 @@ def render(state: hub.HubState, width: int, height: int, ascii_mode: bool = Fals
                               max(LIMIT_BLOCK_LINES, height - FIXED_LINES - MIN_HOST_ROWS))
 
     # Host blocks, truncated to the rows that fit; the total row and footer always stay.
-    blocks = [_host_lines(h, hw, age_w, g, show_idle) for h in state.hosts]
+    blocks = [_host_lines(h, hw, age_w, g, lay, show_idle) for h in state.hosts]
     avail = height - FIXED_LINES - len(limit_rows)
     body = []  # type: List[List[Span]]
     if not blocks:
@@ -593,9 +625,9 @@ def render(state: hub.HubState, width: int, height: int, ascii_mode: bool = Fals
     lines = [_rule(g, g.tl, g.tr, width, "grid-fleet", _stamp(state.now))]
     lines += [_boxed(r, inner, g) for r in limit_rows]
     lines += [_rule(g, g.lt, g.rt, width, "HOSTS"),
-              _boxed(_head_line(hw, age_w, show_idle), inner, g)]
+              _boxed(_head_line(hw, age_w, lay, show_idle), inner, g)]
     lines += [_boxed(b, inner, g) for b in body]
-    lines += [_boxed(_total_line(state, hw, age_w, show_idle), inner, g)]
+    lines += [_boxed(_total_line(state, hw, age_w, lay, show_idle), inner, g)]
 
     # Whatever the hosts table left free goes to the sparkline/leaderboard panel. The hosts
     # come first: a truncated table ("N more hosts") means no panel at all.
