@@ -349,6 +349,22 @@ hostnames, paths or payload content beyond the limits fields below.
   progress in the code (not landed at `a38edcc`). TODO follow-up 8 (PATH recording) bit once.
   Separate idea, undecided: show a per-host reason for null `sessions` in the view.
 
+### Incident: flaky ssh to the hub's tunnel (retry and tunnel fix)
+
+- Symptom: during the rollout about 1 in 4 ssh connections from spokes to the hub failed with
+  exit 255, after 20+ seconds. Hosts went grey in bursts.
+- Cause: the hub's `cloudflared` log showed repeated `failed to dial to edge with quic: timeout: no
+  recent network activity`. The hub's network was dropping its QUIC (UDP) connections to the edge.
+  Infrastructure, not a grid-fleet bug.
+- Fix, applied by the maintainer on the hub: `protocol: http2` in the tunnel's config (TCP instead of
+  QUIC), then a service restart.
+- After: 12 of 12 test connections succeeded in 0-1 s (one took 6 s), zero error lines in the tunnel
+  log, and all six hosts fresh (`6 of 6 hosts fresh`).
+- Code change prompted by it: `push` retries transient ssh transport failures within one tick (up to
+  3 attempts, 5 s then 15 s apart; worst case 200 s). Independent QA of the retry: in progress.
+- Lesson: the hub's tunnel health decides the fleet's freshness. If hosts go grey in bursts, check
+  the tunnel log first.
+
 ### Still open (HUMAN)
 
 - 8.1 timers across sleep and reboot (macOS laptop sleep 3+ minutes with a 60 s throwaway agent; Linux
