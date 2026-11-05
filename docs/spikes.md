@@ -84,6 +84,7 @@ Verdict:
   The temp dirs were removed afterwards.
 - Claude Code version observed on that laptop: 2.1.318. The code's tested list holds 2.1.305;
   task 9.4 records the final version.
+  - Update 2026-11-05: the tested list now also holds 2.1.304, 2.1.311 and 2.1.318 (verified on real hosts).
 
 ## Fleet bring-up (real hosts)
 
@@ -151,6 +152,8 @@ Findings:
 2. The remaining warning on every host is `claude 2.1.306 not in tested versions` (the tested list
    holds 2.1.305). Expected behaviour. Adding the version to the tested list is task 9.4 and needs
    the human.
+   - Update 2026-11-05: 2.1.304, 2.1.311 and 2.1.318 were verified on real hosts and added; the tested list
+     is now 2.1.304, 2.1.305, 2.1.311 and 2.1.318, so 2.1.306 would still warn.
 3. No timers exist yet (Group 8), so all pushes were manual.
 
 ### Fleet bring-up, second round (two more machines)
