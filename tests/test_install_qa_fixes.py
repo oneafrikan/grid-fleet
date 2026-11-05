@@ -6,6 +6,8 @@ value is synthetic.
 These are the author's own self-checks, not independent verification.
 """
 
+import contextlib
+import io
 import os
 import subprocess
 import sys
@@ -13,7 +15,7 @@ import unittest
 
 from grid_fleet import install
 
-from test_install import FakeRunner
+from test_install import PY, SCRIPT, UID, FakeRunner, _read, _readb
 from test_install_config import ConfigCase
 
 BIN = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
@@ -217,6 +219,74 @@ class TestBareDoubleDashFlagValue(ConfigCase):
                            capture_output=True, text=True)
         self.assertIn(r.returncode, (0, 2), r.stderr)  # 0 on newer Pythons, 2 on 3.9
         self.assertNotIn("[]", r.stderr)
+
+
+class TestSurvivingMutantGaps(ConfigCase):
+    """Cases a mutation run showed no test pinned down (each was confirmed to fail against
+    a deliberate mutation of install.py before being committed)."""
+
+    def test_config_created_by_someone_else_during_the_prompt_is_not_overwritten(self):
+        # No config at plan time, so the plan says 'will be created'. A file appearing
+        # before the write must be detected and left alone.
+        racing = '{"schema": 1, "hub": "someone-elses-hub"}\n'
+
+        def answer(_text):
+            os.makedirs(self.cfg_dir, exist_ok=True)
+            with open(self.cfg_path, "w") as fh:
+                fh.write(racing)
+            return "y"
+
+        runner = FakeRunner()
+        rc, _out, err = self._run_with_prompt(answer, runner)
+        self.assertEqual(rc, install.EXIT_REFUSED)
+        self.assertEqual(_read(self.cfg_path), racing)
+        self.assertIn("appeared while waiting", err)
+        self.assertEqual(runner.mutating(), [], "timer must not be loaded either")
+        self.assertFalse(os.path.exists(self.plist))
+
+    def _run_with_prompt(self, answer, runner):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = install.install_main(
+                self.nohub, self.args(apply=True, hub="hub-alias"), runner=runner,
+                env=self.env, platform="darwin", python=PY, script=SCRIPT, uid=UID,
+                is_tty=lambda: True, prompt=answer)
+        return rc, out.getvalue(), err.getvalue()
+
+    def test_account_only_change_is_applied_and_the_repeat_is_a_clean_noop(self):
+        self.run_install(config=self.nohub, apply=True, hub="hub-alias", account="team-a")
+        self.runner.calls.clear()
+        rc, out, err = self.run_install(config=self.loaded_config(), apply=True,
+                                        account="team-b")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(self.config_json()["account"], "team-b")
+        self.assertIn("config written", out)
+        self.assertEqual(len(self.prompts), 1)
+        # Repeat with the same input: nothing to change, no prompt, no write.
+        before = _readb(self.cfg_path)
+        rc, out, err = self.run_install(config=self.loaded_config(), apply=True,
+                                        account="team-b")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("nothing to change", out)
+        self.assertEqual(self.prompts, [])
+        self.assertEqual(_readb(self.cfg_path), before)
+
+    def test_stored_account_is_kept_when_account_flag_is_not_passed(self):
+        self.write_config({"schema": 1, "hub": "hub-alias", "account": "team-a"})
+        rc, out, err = self.run_install(config=self.loaded_config(), apply=True,
+                                        interval=900)
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(self.config_json()["account"], "team-a")
+        self.assertEqual(self.config_json()["interval_s"], 900)
+        self.assertIn('"team-a" (unchanged)', out)  # the plan shows it as unchanged too
+
+    def test_statusline_with_interval_is_a_usage_error_and_changes_nothing(self):
+        rc, out, err = self.run_install(statusline=True, interval=300)
+        self.assertEqual(rc, install.EXIT_USAGE)
+        self.assertIn("--interval does not apply to --statusline", err)
+        self.assertEqual(self.prompts, [])
+        self.assertEqual(self.tree(), [self.home])
+        self.assertEqual(self.runner.calls, [])
 
 
 if __name__ == "__main__":
