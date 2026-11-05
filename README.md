@@ -196,7 +196,7 @@ Details: [`design.md`](openspec/changes/fleet-tracer-bullet/design.md), [`tasks.
 ## Claude Code versions
 
 - The collector depends on Claude Code's on-disk layout, which is undocumented.
-- Tested version list: 2.1.305 (the version the layout and `claude agents --json` were verified on).
+- Tested version list: 2.1.304, 2.1.305, 2.1.311 and 2.1.318 (the versions the layout and `claude agents --json` were verified on).
 - Any other version still collects. The snapshot gets a warning `claude <version> not in tested versions`. The warning is in `snapshot.json` and the pushed snapshot; the view does not display it.
 - If `claude` is not found (it is often missing from the PATH of a non-interactive shell), `sessions` is `unknown` and the snapshot carries a warning. Put `claude` on the `PATH` before running `install`, or set `GRID_FLEET_CLAUDE_BIN`.
 

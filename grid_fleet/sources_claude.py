@@ -38,7 +38,8 @@ from typing import Callable, Dict, List, Optional, Tuple
 
 # Versions the transcript/CLI layout has been verified on. A run on any other
 # version still collects (fail soft) but adds a warning.
-TESTED_VERSIONS = ("2.1.305",)
+# 2.1.304, 2.1.311 and 2.1.318 verified on real hosts 2026-11-05.
+TESTED_VERSIONS = ("2.1.304", "2.1.305", "2.1.311", "2.1.318")
 
 VERSION_TIMEOUT_S = 5
 # Read at call time (not bound as a default arg) so tests can shorten it.
