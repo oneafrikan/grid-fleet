@@ -110,5 +110,46 @@ class TestRewriteNoteNamesTheFile(ConfigCase):
         self.assertIn("note: other.json is not", note)
 
 
+class TestTimerFailureAfterConfigWritten(ConfigCase):
+    """Config is written BEFORE the timer loads; if the load fails the error must say the
+    config is already on disk and that re-running is safe."""
+
+    def test_launchd_bootstrap_failure_mentions_written_config_and_safe_rerun(self):
+        runner = FakeRunner(fail_on="bootstrap")
+        rc, out, err = self.run_install(config=self.nohub, runner=runner, apply=True,
+                                        hub="hub-alias")
+        self.assertEqual(rc, install.EXIT_REFUSED)
+        self.assertIn("bootstrap", err)  # the original failure is still shown
+        self.assertIn("config was already written", err)
+        self.assertIn(self.cfg_path, err)
+        self.assertIn("re-running the same command is safe", err)
+        self.assertEqual(self.config_json()["hub"], "hub-alias")  # it really was written
+
+    def test_systemd_enable_failure_says_the_same(self):
+        runner = FakeRunner(fail_on="enable")
+        rc, _out, err = self.run_install("systemd", config=self.nohub, runner=runner,
+                                         apply=True, hub="hub-alias")
+        self.assertEqual(rc, install.EXIT_REFUSED)
+        self.assertIn("config was already written", err)
+
+    def test_rerun_after_the_failure_repairs(self):
+        self.run_install(config=self.nohub, runner=FakeRunner(fail_on="bootstrap"),
+                         apply=True, hub="hub-alias")
+        rc, _out, err = self.run_install(config=self.loaded_config(), apply=True,
+                                         hub="hub-alias")
+        self.assertEqual(rc, 0, err)
+        self.assertTrue(os.path.exists(self.plist))
+        self.assertEqual(self.runner.loaded, True)
+
+    def test_no_such_line_when_the_config_was_not_changed(self):
+        # Config already matches; only the timer step fails: nothing was written to mention.
+        self.write_config({"schema": 1, "interval_s": 600, "hub": "hub-alias",
+                           "account": "default"})
+        rc, _out, err = self.run_install(config=self.loaded_config(),
+                                         runner=FakeRunner(fail_on="bootstrap"), apply=True)
+        self.assertEqual(rc, install.EXIT_REFUSED)
+        self.assertNotIn("already written", err)
+
+
 if __name__ == "__main__":
     unittest.main()

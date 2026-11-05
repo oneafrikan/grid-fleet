@@ -1267,13 +1267,22 @@ def install_main(config, args, *, runner: Optional[Runner] = None,
         return EXIT_REFUSED
     # Config BEFORE the timer: the first tick (which can fire as soon as the timer is
     # loaded) must already see the right hub and interval_s.
+    config_written = False
     try:
         if cfg_edit.changed:
             _apply_config_edit(cfg_edit)
+            config_written = True
         if not timer_current:
             _apply(kind, entries, uid, runner, config.state_dir, loaded)
     except (InstallError, OSError) as exc:
         sys.stderr.write("grid-fleet install: %s\n" % exc)
+        if config_written:
+            # The scheduler step failed after the config was already on disk: say so, or the
+            # user thinks nothing happened. Re-running is safe: the config then compares
+            # equal, and the timer files are rewritten / reloaded as needed.
+            sys.stderr.write("grid-fleet install: the config was already written (%s); "
+                             "re-running the same command is safe and repairs the timer\n"
+                             % cfg_edit.path)
         return EXIT_REFUSED
     if cfg_edit.changed:
         sys.stdout.write("config written: %s\n" % cfg_edit.path)
