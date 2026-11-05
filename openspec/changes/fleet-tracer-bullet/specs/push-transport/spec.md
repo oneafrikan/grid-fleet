@@ -17,7 +17,7 @@ Deliver each host's latest snapshot to a hub the user chooses, over plain ssh, w
 
 #### Scenario: Hub unreachable
 - **WHEN** ssh fails
-- **THEN** push exits non-zero, keeps the local snapshot, logs a one-line reason, and does not retry in a loop
+- **THEN** push exits non-zero, keeps the local snapshot, logs a one-line reason, and retries only as the "Transient ssh failure is retried" requirement allows (never an unbounded loop)
 - **AND** the logged line contains only the reason class and exit code and MUST NOT echo ssh's own output, which may name the hub
 
 #### Scenario: Hostile hub alias
@@ -27,6 +27,34 @@ Deliver each host's latest snapshot to a hub the user chooses, over plain ssh, w
 #### Scenario: Hub not configured
 - **WHEN** `hub` is absent from config
 - **THEN** push exits non-zero with a message naming the missing key and sends nothing
+
+### Requirement: Transient ssh failure is retried
+When an ssh delivery fails at the transport level, push SHALL retry it within the same run, up to 3 attempts in total: it waits 5 seconds before the second attempt and 15 seconds before the third. A transport failure is ssh exiting 255 or the per-attempt timeout backstop firing. Every attempt MUST send the same snapshot bytes. Push MUST NOT retry any other failure: a remote command that ran and failed (any other non-zero ssh exit, such as the hub refusing an incomplete stream), a rejected `hub` value, ssh not being runnable, or `hub` set to `"local"`. Push SHALL still print exactly one line, free of the hub name and ssh output, and the exit codes stay as before. The worst case for one run is bounded: 3 times the per-attempt timeout plus the two waits.
+
+#### Scenario: Retry succeeds
+- **WHEN** the first ssh attempt exits 255 and the second succeeds
+- **THEN** push waits 5 seconds between them, sends the same bytes both times, exits 0, the hub inbox holds the complete `<host>.json`, and the one line reads `push: delivered (ssh, attempt 2 of 3)`
+- **AND** a push that succeeds on its first attempt still reads `push: delivered (ssh)` and does not wait
+
+#### Scenario: Retries exhausted
+- **WHEN** all 3 attempts fail at the transport level
+- **THEN** push waits 5 seconds then 15 seconds, exits with the same non-zero code as a single failure, keeps the local snapshot, and logs the one line `push failed (ssh exit 255) after 3 attempts; local snapshot kept` (a timeout reads `timeout after <n>s` in place of `ssh exit 255`)
+
+#### Scenario: Timeout is retried
+- **WHEN** an ssh attempt hits the timeout backstop and the next attempt succeeds
+- **THEN** the push is retried like an exit 255 and succeeds
+
+#### Scenario: Remote failure is not retried
+- **WHEN** ssh exits with any non-zero status other than 255
+- **THEN** push makes exactly one attempt, does not wait, and logs `push failed (ssh exit <n>); local snapshot kept`
+
+#### Scenario: Config errors and the local hub are not retried
+- **WHEN** `hub` is rejected as invalid, or is `"local"`
+- **THEN** push never retries and never waits
+
+#### Scenario: Interrupted attempt then clean attempt
+- **WHEN** the connection drops mid-transfer on the first attempt and the second attempt completes
+- **THEN** the hub's `<host>.json` is the complete snapshot and no temporary file is left in the inbox
 
 ### Requirement: Atomic delivery
 The hub-side write MUST be atomic: a reader never observes a partial `<host>.json`. The hub MUST NOT rename a temporary file that does not end in a newline.
